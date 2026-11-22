@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { decryptSnapshot, encryptedFileName, encryptSnapshot } from '../src/core/snapshot-crypto';
+import { decryptSnapshot, encryptedFileName, encryptSnapshot } from '../src/cli/snapshot-crypto';
 import type { Snapshot } from '../src/core/snapshot';
 
 const snapshot: Snapshot = {

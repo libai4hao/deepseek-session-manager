@@ -41,7 +41,7 @@ CLI 同样是 esbuild 打包为单文件 ESM（`dist/dsx-cli.mjs`），banner �
 ## 四、语言与测试
 
 - **TypeScript strict**：`noUnusedLocals` / `noUnusedParameters` / `noFallthroughCasesInSwitch` 全开。接口字段全部来自未文档化响应，`unknown` + 显式收窄比 `any` 安全得多。
-- **vitest**：core 是纯逻辑，可直接对 `Transport` 打桩。25 个用例覆盖解析边界、归属校验、dry-run、形态切换、鉴权中止、5xx 重试、storageState 解析——这些正是"删错/删不动"的高发点。
+- **vitest**：core 是纯逻辑，可直接对 `Transport` 打桩。44 个用例覆盖解析边界、归属校验、dry-run、形态切换、鉴权中止、5xx 重试、storageState 解析、断点续跑账本、快照加解密与参数守卫——这些正是"删错/删不动"的高发点。
 - **不引 UI 框架**：面板用 Shadow DOM + 模板字符串，避免与站点样式互相污染，也避免为 300 行 UI 引入 React 运行时。代价是手写渲染函数，可接受。
 
 ## 五、依赖清单

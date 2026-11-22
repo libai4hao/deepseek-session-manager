@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
 
-import type { Snapshot } from './snapshot';
+import type { Snapshot } from '../core/snapshot';
 
 export interface EncryptedSnapshot {
   schema: 'dsx.snapshot.enc.v1';

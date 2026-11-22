@@ -20,7 +20,7 @@
 - `dist/dsx.user.js` 的 `@version`
 - `dist/extension/manifest.json` 的 `version`
 
-发版流程固定为：改 `package.json` → 构建校验 → 提交 → 打 tag → 发 Release。**不要**手工改 dist 里的版本，也不要让 tag 名与 version 不一致（`v0.2.0` ↔ `0.2.0`）。
+发版流程固定为：改 `package.json` → 构建校验 → 提交 → 打 tag → 发 Release。**不要**手工改 dist 里的版本，也不要让 tag 名与 version 不一致（`v0.2.2` ↔ `0.2.2`）。
 
 ## 三、前置检查
 
@@ -38,6 +38,8 @@ Chrome 路径（打包校验用）：
 ```
 
 ## 四、构建与验证
+
+两道自动化关卡：`.github/workflows/ci.yml` 在每次 push / PR 跑类型检查、单测、构建与产物校验；`.github/workflows/release.yml` 在 tag 上做同样的事后再发布。
 
 ```powershell
 cd D:\Project\my\vibe-work\dsx
@@ -75,11 +77,11 @@ node --check dist\extension\dsx.js
 
 ```powershell
 # MV3（manifest 必须在压缩包根目录，不能套一层 extension/）
-Compress-Archive -Path dist\extension\* -DestinationPath "dist\dsx-0.2.0-mv3.zip" -Force
+Compress-Archive -Path dist\extension\* -DestinationPath "dist\dsx-0.2.2-mv3.zip" -Force
 
 # npm 包（先 build，tgz 才含 dist）
 npm pack
-# → deepseek-session-manager-0.2.0.tgz
+# → deepseek-session-manager-0.2.2.tgz
 
 # CLI 单文件分发不需要额外打包，直接给 dist/dsx-cli.mjs
 ```
@@ -97,15 +99,15 @@ https://github.com/libai4hao/deepseek-session-manager/releases/latest/download/d
 ```powershell
 # 提交（若还有未提交改动）
 git add -A
-git commit -m "release: v0.2.0"
+git commit -m "release: v0.2.2"
 git push origin main
 
 # 打 tag 并发布，资产一次挂上
-gh release create v0.2.0 `
+gh release create v0.2.2 `
   dist/dsx.user.js `
   dist/dsx-cli.mjs `
-  dist/dsx-0.2.0-mv3.zip `
-  --title "DSX v0.2.0" `
+  dist/dsx-0.2.2-mv3.zip `
+  --title "DSX v0.2.2" `
   --notes "油猴/MV3/CLI 三形态；新增 --export-only、--resume、快照加密（scrypt + AES-256-GCM）、progress.json 账本。44 例单测通过。"
 ```
 
@@ -152,7 +154,7 @@ npm publish --access public
 
 - 包名 `deepseek-session-manager`，`bin` 为 `dsx → dist/dsx-cli.mjs`；
 - 发布前确认 tgz 里 `dist/` 存在（`files` 字段包含 `dist`，但 dist 不入库，必须先 build）；
-- 撤销窗口只有 24 小时：`npm unpublish deepseek-session-manager@0.2.0`。
+- 撤销窗口只有 24 小时：`npm unpublish deepseek-session-manager@0.2.2`。
 
 ## 八、发布后验收（四项，缺一不可）
 
@@ -166,7 +168,7 @@ curl.exe -sL https://github.com/libai4hao/deepseek-session-manager/releases/late
   Select-String '@version'
 
 # 3) Release 资产清单
-gh release view v0.2.0 --json tagName,isDraft,assets
+gh release view v0.2.2 --json tagName,isDraft,assets
 
 # 4) 真机冒烟：Tampermonkey 用 URL 安装 → 打开 chat.deepseek.com 见悬浮球；
 #    或 chrome://extensions 加载 dist\extension → 刷新页面见悬浮球
@@ -178,14 +180,14 @@ gh release view v0.2.0 --json tagName,isDraft,assets
 
 ```powershell
 # 撤 Release（保留 tag 时可只删 Release）
-gh release delete v0.2.0 --yes
+gh release delete v0.2.2 --yes
 
 # 连 tag 一起撤
-git push origin :refs/tags/v0.2.0
-git tag -d v0.2.0
+git push origin :refs/tags/v0.2.2
+git tag -d v0.2.2
 
 # npm
-npm unpublish deepseek-session-manager@0.2.0
+npm unpublish deepseek-session-manager@0.2.2
 ```
 
 回滚后旧的 `latest/download` 会指向更早的 Release，已安装用户的自动更新会“降级”回旧版——这是 `@updateURL` 的固有行为，必要时在 Release notes 里说明。

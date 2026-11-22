@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Verify artifacts
+        run: |
+          node --check dist/dsx-cli.mjs
+          node --check dist/extension/dsx.js
+          test "$(grep -c '==UserScript==' dist/extension/dsx.js || true)" = "0"
+          grep -q '@updateURL' dist/dsx.user.js
+          grep -q '@supportURL' dist/dsx.user.js
+          test -f dist/extension/manifest.json
+          node -p "require('./dist/extension/manifest.json').version"
+
+      - name: Guard core purity
+        run: |
+          # src/core must stay dual-end: no node: imports allowed there.
+          if grep -rn "from 'node:" src/core; then
+            echo "src/core must not import node builtins; move it to src/cli" >&2
+            exit 1
+          fi
+          echo "core is node-free"

@@ -1,5 +1,6 @@
 # DSX · DeepSeek 会话管家
 
+[![CI](https://github.com/libai4hao/deepseek-session-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/libai4hao/deepseek-session-manager/actions/workflows/ci.yml)
 [![Release](https://github.com/libai4hao/deepseek-session-manager/actions/workflows/release.yml/badge.svg)](https://github.com/libai4hao/deepseek-session-manager/actions/workflows/release.yml)
 
 把一条会话链接，变成一个**可校验、可留档、可审计**的删除动作。
@@ -20,7 +21,7 @@ DeepSeek 网页版没有"给个链接就把这条会话处理掉"的能力：侧
 | 删除前快照 | ✅ 下载 JSON | ✅ `snapshots/` | 仅实际执行时生成；失败即中止删除 |
 | 快照加密 | — | ✅ `--snapshot-encrypt` | scrypt + AES-256-GCM；口令只从 `DSX_SNAPSHOT_PASSWORD` 读 |
 | 仅导出（不删） | — | ✅ `--export-only` | 与 `--apply` 互斥；适合先备份后决定 |
-| 预演（dry-run） | ✅ 默认勾选 | ✅ 默认开启 | 预演只读：不写快照、不调删除接口 |
+| 预演（dry-run） | ✅ 默认勾选 | ✅ 默认开启 | 不拉消息、不写快照、不调删除接口；只写报告与审计 |
 | 串行限速 | ✅ 500ms / 20 条 / 10s | ✅ 三个参数可配 | 不并发，宁可慢 |
 | 删除形态自适应 | ✅ | ✅ | 422 → 单数体切数组体 |
 | 鉴权失效中止 | ✅ | ✅ | `401` / `code 40003` → 余下标 `ABORTED` |
@@ -29,8 +30,8 @@ DeepSeek 网页版没有"给个链接就把这条会话处理掉"的能力：侧
 | 审计 | ✅ 本地存储 + 下载 | ✅ `audit.jsonl` | 脱敏，账号只存 sha256 前 8 字节 |
 | 批量确认 | ✅ >5 条输入 `DELETE` | ✅ `--yes` | 单次硬上限 50 条 |
 | 断点续跑 | — | ✅ `--resume` | 读 `<out>/progress.json`：跳过已完成、复用已有快照 |
-| 持久安装 | ✅ 油猴脚本 / MV3 壳 | — | 刷新不失效；MV3 产物在 `dist/extension/` |
-| 标题打码 | — | ✅ `--mask-title` | 只影响报告，不改变快照内容 |
+| 持久安装 | ✅ 油猴 / MV3 壳 | — | 刷新不失效；MV3 产物在 `dist/extension/` |
+| 标题打码 | — | ✅ `--mask-title` | 同时作用于报告与审计；不改变快照内容 |
 
 ## 快速开始
 
@@ -114,11 +115,11 @@ DSX_SNAPSHOT_PASSWORD='...' node dist/dsx-cli.mjs --state auth.json --file links
 ## 仓库结构
 
 ```
-src/core/        纯逻辑：parser / http / repository / guard / executor / snapshot / snapshot-crypto / audit
+src/core/        纯逻辑：parser / http / repository / guard / executor / snapshot / audit（双端可用，不含 node: 导入）
 src/userscript/  油猴面板与 MV3 content script 共用（Shadow DOM，单文件产物）
-src/cli/         命令行：参数、storageState 解析、断点续跑、报告
+src/cli/         命令行：参数、storageState 解析、快照加密、断点续跑、报告（可用 node: 能力）
 tests/           vitest 单测
-docs/            方案、接口、选型、开源对照、开发计划
+docs/            方案、接口、选型、开源对照、开发计划、打包发布
 scripts/build.mjs  esbuild 构建 + MV3 打包（dist/extension/）
 ```
 

@@ -8,7 +8,7 @@ import { buildIndex, guardLink } from '../core/guard';
 import { getAccountId, getMessages, listSessions, verifyDeleted } from '../core/repository';
 import { runQueue } from '../core/executor';
 import { buildSnapshot, snapshotFileName } from '../core/snapshot';
-import { encryptSnapshot, encryptedFileName } from '../core/snapshot-crypto';
+import { encryptSnapshot, encryptedFileName } from './snapshot-crypto';
 import { execResultToAudit, hashId, toAuditLine, type AuditEvent } from '../core/audit';
 import type { ExecResult, SessionMeta } from '../core/types';
 import { parseArgs, USAGE, type CliArgs } from './args';

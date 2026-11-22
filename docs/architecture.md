@@ -21,7 +21,7 @@
 └────────────────────────────────────────┘
 ```
 
-关键约束：`src/core` 不 import 任何浏览器或 Node 专属 API（除 `fetch` / `crypto.subtle` 这类双端可用能力）。两端行为因此不会漂移——同一个 `runQueue` 决定了油猴和 CLI 的删除语义。
+关键约束：`src/core` 不 import 任何浏览器或 Node 专属 API（除 `fetch` / `crypto.subtle` 这类双端可用能力），Node 专属能力（`node:crypto`、`node:fs`）只允许出现在 `src/cli`。两端行为因此不会漂移——同一个 `runQueue` 决定了油猴和 CLI 的删除语义。
 
 ## 模块
 
@@ -35,10 +35,10 @@
 | `src/core/guard.ts` | 归属与置顶校验 | `buildIndex`、`guardLink` |
 | `src/core/executor.ts` | 串行删除、限速、分批、重试、形态探测 | `deleteSession`、`runQueue` |
 | `src/core/snapshot.ts` | 删除前快照与文件命名 | `buildSnapshot`、`snapshotFileName` |
-| `src/core/snapshot-crypto.ts` | 快照加密/解密（Node 端） | `encryptSnapshot`、`decryptSnapshot`、`encryptedFileName` |
 | `src/core/audit.ts` | 审计事件、脱敏、id 哈希 | `toAuditLine`、`hashId`、`execResultToAudit` |
 | `src/core/auth.ts` | 从 `localStorage.userToken` 取 token | `tokenFromUserToken` |
 | `src/cli/state.ts` | 解析 Playwright storageState | `readStorageState` |
+| `src/cli/snapshot-crypto.ts` | 快照加密/解密（Node `crypto`，仅 CLI） | `encryptSnapshot`、`decryptSnapshot`、`encryptedFileName` |
 | `src/cli/progress.ts` | 断点续跑账本 | `readProgress`、`completedIds`、`reusableSnapshots`、`mergeResults` |
 | `src/cli/report.ts` | 报告结构与 Markdown 渲染 | `renderMarkdown`、`ReportMode` |
 
