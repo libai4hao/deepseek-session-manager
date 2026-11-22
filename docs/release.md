@@ -267,7 +267,7 @@ Get-Content dist\dsx.user.js -TotalCount 18
 
 ### 11.4 更新与版本同步
 
-Greasy Fork 会用自己托管的副本分发，并在安装时把 `@downloadURL`/`@updateURL` 指向站点自身——所以：
+Greasy Fork 用自己的脚本页作为分发入口，安装后由站点上的版本驱动更新（是否重写 `@downloadURL` 以站点当前行为为准）——所以：
 
 - **从 Greasy Fork 安装的用户，只会跟着 Greasy Fork 的脚本页更新**；
 - **从 GitHub Release 安装的用户，跟着 `releases/latest` 更新**；
