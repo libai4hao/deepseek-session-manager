@@ -1,5 +1,7 @@
 # DSX · DeepSeek 会话管家
 
+[![Release](https://github.com/libai4hao/deepseek-session-manager/actions/workflows/release.yml/badge.svg)](https://github.com/libai4hao/deepseek-session-manager/actions/workflows/release.yml)
+
 把一条会话链接，变成一个**可校验、可留档、可审计**的删除动作。
 
 DeepSeek 网页版没有"给个链接就把这条会话处理掉"的能力：侧栏翻找靠肉眼，删除靠手点，删了什么没人记得。DSX 把这件事拆成六步——解析、归属校验、快照、确认、删除、审计——并做成油猴面板与命令行两端，共用同一套核心逻辑。

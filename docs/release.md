@@ -115,6 +115,33 @@ gh release create v0.2.0 `
 - Release 不要勾 Draft，否则 `latest/download` 解析不到；
 - 发完 `latest` 会自动指向这个 Release，`@updateURL` 立即生效。
 
+### 6.1 交给 Actions 自动发布
+
+`.github/workflows/release.yml` 已经接好：push `v*` tag 时自动执行 `typecheck → test → build → 打包 MV3 → 校验产物 → 发布 Release`，无需本地构建。
+
+日常发版简化为三步：
+
+```powershell
+# 1) 改 package.json 的 version，并提交
+git add -A && git commit -m "release: v0.2.2" && git push origin main
+
+# 2) 打 tag 并推上去，触发工作流
+git tag v0.2.2
+git push origin v0.2.2
+
+# 3) 看结果
+gh run watch
+gh release view v0.2.2
+```
+
+工作流还支持手动重跑（`gh workflow run release.yml -f tag=v0.2.2`）：
+
+- 已存在同名 Release 时用 `gh release upload --clobber` 刷新资产，不会重复建 Release；
+- 会先校验 `package.json` 版本与 tag 一致，不一致直接失败——防止发错版本；
+- 资产校验包括 `node --check`、MV3 里无 UserScript 头、`@updateURL` 存在、`@version` 与版本号一致。
+
+注意：CI 用 `GITHUB_TOKEN` 发布，工作流需要 `contents: write` 权限（已在文件里声明）；fork 仓库需要自行确认 Actions 未被禁用。
+
 ## 七、发 npm（可选）
 
 ```powershell

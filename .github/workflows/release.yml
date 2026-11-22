@@ -1,0 +1,92 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: '已存在的 tag（如 v0.2.1），用于重跑或补传资产'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref_name }}
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+      - name: Check tag matches package version
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          if [ "v$VERSION" != "$TAG" ]; then
+            echo "package.json version ($VERSION) does not match tag ($TAG)" >&2
+            exit 1
+          fi
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+
+      - name: Package MV3
+        run: |
+          cd dist/extension
+          zip -qr "../dsx-${VERSION}-mv3.zip" .
+          cd ../..
+          ls -l dist
+
+      - name: Verify artifacts
+        run: |
+          node --check dist/dsx-cli.mjs
+          node --check dist/extension/dsx.js
+          test "$(grep -c '==UserScript==' dist/extension/dsx.js || true)" = "0"
+          grep -q '@updateURL' dist/dsx.user.js
+          grep -q "@version      ${VERSION}" dist/dsx.user.js
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          ASSETS="dist/dsx.user.js dist/dsx-cli.mjs dist/dsx-${VERSION}-mv3.zip"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "release $TAG exists, refreshing assets"
+            gh release upload "$TAG" $ASSETS --clobber
+          else
+            gh release create "$TAG" $ASSETS \
+              --title "DSX ${TAG}" \
+              --generate-notes
+          fi
