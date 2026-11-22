@@ -3,10 +3,10 @@
  * left sidebar into view and highlight it.
  *
  * Reality check (measured 2026-11): the sidebar renders ~100 items inside a scrollable
- * area and does NOT load more when scrolled. Older sessions exist in the API but are
- * absent from the DOM, so locating can only work inside the loaded window. We therefore
- * stop as soon as two consecutive probes see the same anchor set, instead of scrolling
- * dozens of screens for nothing.
+ * area and no additional items appeared while scrolling. Older sessions exist in the API
+ * but are absent from the DOM, so locating can only work inside the loaded window. We
+ * therefore stop as soon as two consecutive probes see the same anchor set, instead of
+ * scrolling dozens of screens for nothing.
  *
  * Locating is a UI affordance only. Existence is still decided by the API list.
  */
