@@ -1,0 +1,40 @@
+{
+  "name": "deepseek-session-manager",
+  "version": "0.1.0",
+  "description": "Link-driven manager for DeepSeek web chat sessions: parse a session link, verify ownership, snapshot, delete and audit.",
+  "type": "module",
+  "license": "MIT",
+  "private": false,
+  "engines": {
+    "node": ">=18"
+  },
+  "bin": {
+    "dsx": "dist/dsx-cli.mjs"
+  },
+  "files": [
+    "dist",
+    "docs",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "cli": "node dist/dsx-cli.mjs"
+  },
+  "keywords": [
+    "deepseek",
+    "userscript",
+    "chat-session",
+    "cli",
+    "privacy",
+    "audit"
+  ],
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.1.0"
+  }
+}

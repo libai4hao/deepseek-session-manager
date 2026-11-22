@@ -1,0 +1,32 @@
+# dependencies
+node_modules/
+.pnpm-store/
+
+# build output
+dist/
+*.tsbuildinfo
+
+# runtime output (may contain chat content)
+dsx-out/
+snapshots/
+audit*.jsonl
+report*.json
+report*.md
+
+# credentials / session state — never commit
+auth.json
+auth*.json
+storage-state*.json
+state*.json
+.env
+.env.*
+
+# editors / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# logs
+*.log

@@ -1,0 +1,313 @@
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+import { ApiFailure, authHeaders, classifyResult } from '../core/http';
+import { createFetchTransport } from '../core/transport';
+import { dedupeLinks, parseLinks, splitLines } from '../core/parser';
+import { buildIndex, guardLink } from '../core/guard';
+import { getAccountId, getMessages, listSessions, verifyDeleted } from '../core/repository';
+import { runQueue } from '../core/executor';
+import { buildSnapshot, snapshotFileName } from '../core/snapshot';
+import { execResultToAudit, hashId, toAuditLine, type AuditEvent } from '../core/audit';
+import type { ExecResult, SessionMeta } from '../core/types';
+import { parseArgs, USAGE, type CliArgs } from './args';
+import { readStorageState, type AccountState } from './state';
+import { renderMarkdown, type PlanItem, type Report } from './report';
+
+const BASE_URL = 'https://chat.deepseek.com';
+const HARD_BATCH_LIMIT = 50;
+const CONFIRM_THRESHOLD = 5;
+
+function loadState(args: CliArgs): AccountState {
+  if (args.state) return readStorageState(args.state);
+  return {
+    source: 'env',
+    token: process.env.DSX_TOKEN,
+    cookieHeader: process.env.DSX_COOKIE,
+  };
+}
+
+function displayWidth(text: string): number {
+  let width = 0;
+  for (const char of text) width += char.charCodeAt(0) > 0x2e7f ? 2 : 1;
+  return width;
+}
+
+function padRight(text: string, width: number): string {
+  return text + ' '.repeat(Math.max(0, width - displayWidth(text)));
+}
+
+function formatTime(updatedAt?: number): string {
+  if (!updatedAt) return '-';
+  return new Date(updatedAt * 1000).toLocaleString('zh-CN', { hour12: false });
+}
+
+function maskTitle(title: string, masked: boolean): string {
+  if (!masked) return title;
+  return title.length <= 2 ? '***' : `${title.slice(0, 2)}***`;
+}
+
+function printPlan(items: PlanItem[]): void {
+  console.log('');
+  console.log(padRight('结果', 8) + padRight('标题', 34) + padRight('更新时间', 20) + '会话 ID');
+  console.log('-'.repeat(104));
+  for (const item of items) {
+    const status = item.action === 'delete' ? '待删除' : '已拒绝';
+    console.log(
+      padRight(status, 8) +
+        padRight(item.title ?? item.id ?? '-', 34) +
+        padRight(formatTime(item.updatedAt), 20) +
+        (item.id ?? '-'),
+    );
+    if (item.detail && item.action !== 'delete') console.log(`        └ ${item.detail}`);
+  }
+}
+
+async function main(): Promise<number> {
+  let args: CliArgs;
+  try {
+    args = parseArgs(process.argv.slice(2));
+  } catch (error) {
+    console.error((error as Error).message);
+    console.error(USAGE);
+    return 2;
+  }
+
+  if (args.help) {
+    console.log(USAGE);
+    return 0;
+  }
+
+  const rawLinks: string[] = [...args.urls];
+  if (args.file) {
+    if (!existsSync(args.file)) {
+      console.error(`找不到链接文件：${args.file}`);
+      return 2;
+    }
+    rawLinks.push(...splitLines(readFileSync(args.file, 'utf8')));
+  }
+
+  if (rawLinks.length === 0) {
+    console.error('没有输入链接：用 --url 或 --file 指定。');
+    console.error(USAGE);
+    return 2;
+  }
+
+  const state = loadState(args);
+  if (!state.token) {
+    console.error('缺少登录凭证：用 --state 指向 Playwright storageState，或设置 DSX_TOKEN。');
+    return 3;
+  }
+
+  const transport = createFetchTransport({
+    baseUrl: BASE_URL,
+    headers: {
+      ...authHeaders(state.token),
+      ...(state.cookieHeader ? { cookie: state.cookieHeader } : {}),
+    },
+    credentials: 'omit',
+  });
+
+  const accountId = await getAccountId(transport).catch(() => undefined);
+  const accountHash = accountId ? await hashId(accountId) : undefined;
+
+  let sessions: SessionMeta[];
+  try {
+    sessions = await listSessions(transport);
+  } catch (error) {
+    if (error instanceof ApiFailure) {
+      const kind = classifyResult(error.result);
+      console.error(`读取会话列表失败：${error.message} [${kind}]`);
+      if (kind === 'auth') console.error('token 可能已失效：重新导出 storageState 后再试。');
+    } else {
+      console.error(`读取会话列表失败：${String(error)}`);
+    }
+    return 3;
+  }
+
+  console.log(`已读取本账号会话 ${sessions.length} 条，账号指纹 ${accountHash ?? '未取到'}`);
+
+  const index = buildIndex(sessions);
+  const metaById = new Map(sessions.map(session => [session.id, session]));
+  const links = dedupeLinks(parseLinks(rawLinks));
+
+  const plan: PlanItem[] = links.map(link => {
+    const outcome = guardLink(link, index, { protectPinned: args.protectPinned });
+
+    if (outcome.ok && outcome.meta) {
+      return {
+        link: link.raw,
+        kind: link.kind,
+        id: outcome.meta.id,
+        title: maskTitle(outcome.meta.title, args.maskTitle),
+        updatedAt: outcome.meta.updatedAt,
+        pinned: outcome.meta.pinned,
+        action: 'delete',
+        detail: '归属校验通过',
+      };
+    }
+
+    return {
+      link: link.raw,
+      kind: link.kind,
+      id: link.id,
+      title: link.id,
+      action: 'reject',
+      code: outcome.code,
+      detail: outcome.detail,
+    };
+  });
+
+  printPlan(plan);
+
+  const deletable = plan.filter(item => item.action === 'delete');
+  const ids = deletable.map(item => item.id as string);
+
+  if (args.apply && ids.length > HARD_BATCH_LIMIT) {
+    console.error(`\n待删除 ${ids.length} 条，超过单次上限 ${HARD_BATCH_LIMIT}，请拆分成多次执行。`);
+    return 2;
+  }
+
+  const isDryRun = !args.apply;
+  if (isDryRun) {
+    console.log(`\n预演完成：${deletable.length} 条可删、${plan.length - deletable.length} 条被拒绝。未调用删除接口。`);
+  } else if (ids.length > CONFIRM_THRESHOLD && !args.yes) {
+    console.error(`\n待删除 ${ids.length} 条（> ${CONFIRM_THRESHOLD}），需要 --yes 显式确认。`);
+    return 2;
+  }
+
+  const outDir = args.out;
+  mkdirSync(outDir, { recursive: true });
+
+  const now = new Date().toISOString();
+  const auditEvents: AuditEvent[] = deletable.map(item => ({
+    ts: now,
+    event: 'plan',
+    sessionId: item.id,
+    title: item.title,
+    updatedAt: item.updatedAt,
+    sourceLink: item.link,
+    accountHash,
+    status: 'planned',
+  }));
+
+  const snapshotFiles = new Map<string, string>();
+
+  if (args.snapshot && ids.length > 0) {
+    const snapshotDir = join(outDir, 'snapshots');
+    mkdirSync(snapshotDir, { recursive: true });
+
+    for (const id of ids) {
+      const meta = metaById.get(id);
+      if (!meta) continue;
+
+      try {
+        const messages = await getMessages(transport, id);
+        const snapshot = buildSnapshot(meta, messages);
+        const fileName = snapshotFileName(meta);
+        writeFileSync(join(snapshotDir, fileName), JSON.stringify(snapshot, null, 2), 'utf8');
+        snapshotFiles.set(id, fileName);
+        console.log(`[snapshot] ${fileName}（${snapshot.messageCount} 段）`);
+      } catch (error) {
+        console.error(`[snapshot] ${id} 快照失败：${String(error)}`);
+        if (args.apply) {
+          console.error('删除前快照失败，已中止。确认无需快照时可加 --no-snapshot。');
+          writeFileSync(join(outDir, 'report.json'), JSON.stringify({ error: 'snapshot-failed', id }, null, 2));
+          return 3;
+        }
+      }
+    }
+  }
+
+  let results: ExecResult[] = [];
+
+  if (args.apply && ids.length > 0) {
+    console.log('');
+    results = await runQueue(
+      transport,
+      ids,
+      {
+        intervalMs: args.intervalMs,
+        batchSize: args.batchSize,
+        batchPauseMs: args.batchPauseMs,
+        retries: args.retries,
+        shape: 'auto',
+      },
+      {
+        onStart: (id, position, total) => {
+          process.stdout.write(`[${position + 1}/${total}] ${id.slice(0, 8)} … `);
+        },
+        onResult: result => {
+          console.log(result.status + (result.reason ? ` (${result.reason})` : ''));
+          auditEvents.push(
+            execResultToAudit(result, {
+              accountHash,
+              sourceLink: deletable.find(item => item.id === result.id)?.link,
+              snapshot: snapshotFiles.get(result.id),
+            }),
+          );
+        },
+        onShapeDetected: shape => console.log(`[dsx] 删除参数形态探测为 ${shape}`),
+      },
+    );
+  }
+
+  let verify: Array<{ id: string; stillThere: boolean }> | undefined;
+  if (args.apply && ids.length > 0) {
+    try {
+      verify = await verifyDeleted(transport, ids);
+      for (const entry of verify) {
+        auditEvents.push({
+          ts: new Date().toISOString(),
+          event: 'verify',
+          sessionId: entry.id,
+          accountHash,
+          status: entry.stillThere ? 'failed' : 'deleted',
+          note: entry.stillThere ? '删除后仍在列表中' : '已从列表消失',
+        });
+      }
+    } catch (error) {
+      console.error(`[verify] 复核失败：${String(error)}`);
+    }
+  }
+
+  const failed = results.filter(result => result.status === 'failed' || result.status === 'aborted');
+  const stillThere = verify?.filter(entry => entry.stillThere) ?? [];
+
+  const report: Report = {
+    schema: 'dsx.report.v1',
+    generatedAt: new Date().toISOString(),
+    dryRun: isDryRun,
+    accountHash,
+    total: plan.length,
+    deletable: deletable.length,
+    rejected: plan.length - deletable.length,
+    items: plan,
+    results: results.length > 0 ? results : undefined,
+    verify,
+    summary: {
+      deleted: results.filter(result => result.status === 'deleted').length,
+      failed: failed.filter(result => result.status === 'failed').length,
+      aborted: failed.filter(result => result.status === 'aborted').length,
+      skipped: results.filter(result => result.status === 'skipped').length,
+      stillThere: stillThere.length,
+    },
+  };
+
+  writeFileSync(join(outDir, 'report.json'), JSON.stringify(report, null, 2), 'utf8');
+  writeFileSync(join(outDir, 'report.md'), renderMarkdown(report), 'utf8');
+  writeFileSync(join(outDir, 'audit.jsonl'), auditEvents.map(toAuditLine).join('\n') + '\n', 'utf8');
+
+  if (results.length > 0) {
+    console.log(
+      `\n汇总：删除 ${report.summary?.deleted ?? 0}，失败 ${report.summary?.failed ?? 0}，中止 ${report.summary?.aborted ?? 0}，删除后仍存在 ${report.summary?.stillThere ?? 0}`,
+    );
+  }
+  console.log(`报告与审计已写入 ${outDir}`);
+
+  if (plan.length > 0 && deletable.length === 0 && args.apply) return 2;
+  return failed.length > 0 || stillThere.length > 0 ? 2 : 0;
+}
+
+const exitCode = await main();
+process.exit(exitCode);
