@@ -376,7 +376,7 @@ async function main(): Promise<number> {
   }
   console.log(`报告与审计已写入 ${outDir}`);
 
-  if (mode === 'export') return exportFailures.size > 0 ? 2 : 0;
+  if (mode === 'export') return exportFailures.size > 0 ? 2 : plan.length > 0 && deletable.length === 0 ? 2 : 0;
   if (mode === 'delete' && plan.length > 0 && deletable.length === 0) return 2;
   return failed.length > 0 || stillThere.length > 0 ? 2 : 0;
 }
