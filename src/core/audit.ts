@@ -46,6 +46,8 @@ export async function hashId(value: string): Promise<string> {
 }
 
 export function execResultToAudit(result: ExecResult, base: Partial<AuditEvent> = {}): AuditEvent {
+  const note = result.reason ?? base.note;
+
   return {
     ...base,
     ts: new Date().toISOString(),
@@ -54,6 +56,6 @@ export function execResultToAudit(result: ExecResult, base: Partial<AuditEvent> 
     status: result.status,
     attempts: result.attempts,
     ms: result.ms,
-    note: result.reason ?? base.note,
+    note: note ? redactSecrets(note) : undefined,
   };
 }

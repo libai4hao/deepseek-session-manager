@@ -193,7 +193,8 @@ async function main(): Promise<number> {
 
   const snapshotFiles = new Map<string, string>();
 
-  if (args.snapshot && ids.length > 0) {
+  // Snapshots are generated only on a real run: preflight must stay read-only.
+  if (args.apply && args.snapshot && ids.length > 0) {
     const snapshotDir = join(outDir, 'snapshots');
     mkdirSync(snapshotDir, { recursive: true });
 
@@ -210,11 +211,9 @@ async function main(): Promise<number> {
         console.log(`[snapshot] ${fileName}（${snapshot.messageCount} 段）`);
       } catch (error) {
         console.error(`[snapshot] ${id} 快照失败：${String(error)}`);
-        if (args.apply) {
-          console.error('删除前快照失败，已中止。确认无需快照时可加 --no-snapshot。');
-          writeFileSync(join(outDir, 'report.json'), JSON.stringify({ error: 'snapshot-failed', id }, null, 2));
-          return 3;
-        }
+        console.error('删除前快照失败，已中止。确认无需快照时可加 --no-snapshot。');
+        writeFileSync(join(outDir, 'report.json'), JSON.stringify({ error: 'snapshot-failed', id }, null, 2));
+        return 3;
       }
     }
   }

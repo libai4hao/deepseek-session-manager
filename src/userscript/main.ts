@@ -360,6 +360,8 @@ function mountPanel(): void {
         setHint(`完成：删除 ${results.filter(r => r.status === 'deleted').length} 条（复核失败）`);
       }
 
+      // Re-arm the preflight switch: the next run must be an explicit opt-in again.
+      dryBox.checked = true;
       applyBtn.disabled = false;
       previewBtn.disabled = false;
     })();
