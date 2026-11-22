@@ -20,6 +20,10 @@ const header = `// ==UserScript==
 // @license      MIT
 // @match        https://chat.deepseek.com/*
 // @run-at       document-idle
+// @grant        none
+// @noframes
+// @homepageURL  https://github.com/libai4hao/deepseek-session-manager
+// @supportURL   https://github.com/libai4hao/deepseek-session-manager/issues
 // @icon         https://www.deepseek.com/favicon.ico
 // @downloadURL  ${releaseBase}/dsx.user.js
 // @updateURL    ${releaseBase}/dsx.user.js

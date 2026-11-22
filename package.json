@@ -1,6 +1,6 @@
 {
   "name": "deepseek-session-manager",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Link-driven manager for DeepSeek web chat sessions: parse a session link, verify ownership, snapshot, delete and audit.",
   "type": "module",
   "license": "MIT",

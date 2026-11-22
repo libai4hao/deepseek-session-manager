@@ -172,7 +172,89 @@ npm unpublish deepseek-session-manager@0.2.0
 - [ ] `DSX_SNAPSHOT_PASSWORD` 只存在于运行环境，不在文档示例里写真实口令
 - [ ] 公开仓库的 Release notes 不包含账号信息、会话标题、会话数量
 
-## 十一、常见问题
+## 十一、发布为浏览器脚本（Greasy Fork / OpenUserJS）
+
+目标：让用户不用碰命令行，点一次链接就能装。
+
+| 渠道 | 是否需要账号 | 更新方式 | 建议用途 |
+|---|---|---|---|
+| GitHub Release 资产 | 仓库维护者 | `@updateURL` 自动检查 | 自用、内部分享、给已有用户兜底 |
+| Greasy Fork | 需要（免费） | 在站点更新脚本页，站点负责分发 | **公开分发的首选**，能被搜到 |
+| OpenUserJS | 需要（免费） | 同上 | 补充渠道，流量较小 |
+
+### 11.1 发布前体检
+
+```powershell
+pnpm build
+Get-Content dist\dsx.user.js -TotalCount 18
+```
+
+必须全部满足：
+
+- `@name` / `@description` / `@version` / `@license MIT` / `@match` 齐全
+- `@grant none`（本脚本只用页面 API，声明 none 可以避免多余权限提示）
+- `@noframes`（避免在 iframe 里重复挂面板）
+- `@homepageURL` / `@supportURL` 指向仓库与 issues
+- 文件里没有 token、cookie、本机绝对路径
+- `node --check dist\dsx.user.js` 通过（IIFE，可被 Node 解析）
+
+### 11.2 Greasy Fork 上架步骤
+
+1. 注册并登录 Greasy Fork（用 GitHub 账号登录最省事）
+2. 右上角用户名 → **Post a new script**
+3. 语言选“中文”，粘贴 `dist/dsx.user.js` 全文（或先填 GitHub Release 直链让站点抓取；粘贴更可控）
+4. 填元数据（见 11.3 的现成文案），许可证选 **MIT**
+5. 截图：悬浮球 + 面板“待删/归属校验通过”那一屏，1～2 张即可
+6. 提交后进入审核/待发布状态，页面出现 `greasyfork.org/scripts/<id>` 链接
+7. 用无痕窗口打开该链接 → 点“安装此脚本”→ 确认 Tampermonkey 装上 → 打开 `chat.deepseek.com` 看悬浮球
+
+### 11.3 上架文案（可直接复制）
+
+```
+名称：DSX - DeepSeek 会话管家
+英文名：DSX - DeepSeek Session Manager
+简介：粘贴 DeepSeek 会话链接，校验归属后快照并删除；默认预演，全程可审计。
+分类：实用工具 / 生产力
+标签：deepseek, chat, session, backup, audit, privacy
+许可证：MIT
+源码：https://github.com/libai4hao/deepseek-session-manager
+支持：https://github.com/libai4hao/deepseek-session-manager/issues
+```
+
+详细描述：
+
+```
+把一条会话链接变成可校验、可留档、可审计的删除动作。
+
+· 只对本人账号生效：必须在本账号会话列表命中，未命中直接拒绝，不盲删
+· 默认预演：不调删除接口、不写快照；确认后才执行
+· 删除前快照：整段对话先落盘，快照失败即中止
+· 置顶保护、串行限速、失败重试、删后复核
+· 每次操作留一行审计，凭证不落盘
+
+另有命令行版（批量、断点续跑、加密快照），见仓库 README。
+非官方工具，调用网页端内部接口，可能随前端改版失效。
+```
+
+### 11.4 更新与版本同步
+
+Greasy Fork 会用自己托管的副本分发，并在安装时把 `@downloadURL`/`@updateURL` 指向站点自身——所以：
+
+- **从 Greasy Fork 安装的用户，只会跟着 Greasy Fork 的脚本页更新**；
+- **从 GitHub Release 安装的用户，跟着 `releases/latest` 更新**；
+- 两个渠道各自独立，发版时必须同时更新，且版本号一致，否则同一版本号不会触发更新。
+
+标准发版动作：改 `package.json` → `pnpm build` → 提交打 tag → `gh release create` 上传资产 → Greasy Fork 脚本页“更新脚本”粘贴新文件 → 无痕窗口验证一次。
+
+> Greasy Fork 是否提供“从 GitHub 自动同步”的入口以其当前站点 UI 为准；没有的话就手动粘贴，别假设会自动同步。
+
+### 11.5 公开分发的风险提示
+
+- 脚本调用的是网页端内部接口，公开传播会放大被平台注意的概率；描述里不要写“批量删除任意会话”“绕过限制”这类措辞。
+- 删除不可撤销，**必须在描述首屏说清**，并保留“仅管理本人数据”的限定。
+- 若收到站点下架通知，先撤 Greasy Fork 页面，再评估是否保留 GitHub 分发。
+
+## 十二、常见问题
 
 | 现象 | 原因 | 处理 |
 |---|---|---|
