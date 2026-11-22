@@ -8,6 +8,8 @@ const pkg = JSON.parse(readFileSync(resolve(root, 'package.json'), 'utf8'));
 
 mkdirSync(resolve(root, 'dist'), { recursive: true });
 
+const releaseBase = 'https://github.com/libai4hao/deepseek-session-manager/releases/latest/download';
+
 const header = `// ==UserScript==
 // @name         DSX - DeepSeek 会话管家
 // @name:en      DSX - DeepSeek Session Manager
@@ -19,6 +21,8 @@ const header = `// ==UserScript==
 // @match        https://chat.deepseek.com/*
 // @run-at       document-idle
 // @icon         https://www.deepseek.com/favicon.ico
+// @downloadURL  ${releaseBase}/dsx.user.js
+// @updateURL    ${releaseBase}/dsx.user.js
 // ==/UserScript==
 `;
 

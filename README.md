@@ -42,8 +42,9 @@ pnpm test         # 44 个单测
 
 | 方式 | 步骤 | 适用 |
 |---|---|---|
+| 一键安装 | 浏览器打开 `https://github.com/libai4hao/deepseek-session-manager/releases/latest/download/dsx.user.js`，Tampermonkey 弹安装页确认 | 普通用户，装完自动更新 |
 | MV3 扩展（推荐自用） | `chrome://extensions` → 打开开发者模式 → 加载已解压的扩展 → 选 `dist/extension` | 刷新不失效，权限最小 |
-| 油猴脚本 | 装 Tampermonkey / Violentmonkey，把 `dist/dsx.user.js` 拖进脚本管理页 | 跨浏览器，改脚本方便 |
+| 油猴脚本（本地） | 装 Tampermonkey / Violentmonkey，把 `dist/dsx.user.js` 拖进脚本管理页 | 改脚本方便 |
 | 临时注入 | 开发者工具粘 `dist/dsx.user.js` 全文执行 | 只做一次验证 |
 
 MV3 壳没有额外权限：`content_scripts` 只匹配 `chat.deepseek.com`，不加 `host_permissions`，脚本走页面同源请求。
@@ -126,6 +127,7 @@ scripts/build.mjs  esbuild 构建 + MV3 打包（dist/extension/）
 - [开源项目对照](docs/open-source-comparison.md)
 - [技术选型](docs/tech-selection.md)
 - [开发计划与验收](docs/roadmap.md)
+- [打包与发布手册](docs/release.md)
 
 ## 开发
 
