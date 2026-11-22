@@ -16,6 +16,8 @@ DeepSeek 网页版没有"给个链接就把这条会话处理掉"的能力：侧
 | 归属校验 | ✅ | ✅ | 必须在本账号列表命中；未命中即拒绝，不盲删 |
 | 置顶保护 | ✅ 固定开启 | ✅ `--include-pinned` 可关 | 置顶会话默认跳过 |
 | 删除前快照 | ✅ 下载 JSON | ✅ `snapshots/` | 仅实际执行时生成；失败即中止删除 |
+| 快照加密 | — | ✅ `--snapshot-encrypt` | scrypt + AES-256-GCM；口令只从 `DSX_SNAPSHOT_PASSWORD` 读 |
+| 仅导出（不删） | — | ✅ `--export-only` | 与 `--apply` 互斥；适合先备份后决定 |
 | 预演（dry-run） | ✅ 默认勾选 | ✅ 默认开启 | 预演只读：不写快照、不调删除接口 |
 | 串行限速 | ✅ 500ms / 20 条 / 10s | ✅ 三个参数可配 | 不并发，宁可慢 |
 | 删除形态自适应 | ✅ | ✅ | 422 → 单数体切数组体 |
@@ -24,16 +26,27 @@ DeepSeek 网页版没有"给个链接就把这条会话处理掉"的能力：侧
 | 删后复核 | ✅ | ✅ | 重拉列表看是否仍在 |
 | 审计 | ✅ 本地存储 + 下载 | ✅ `audit.jsonl` | 脱敏，账号只存 sha256 前 8 字节 |
 | 批量确认 | ✅ >5 条输入 `DELETE` | ✅ `--yes` | 单次硬上限 50 条 |
+| 断点续跑 | — | ✅ `--resume` | 读 `<out>/progress.json`：跳过已完成、复用已有快照 |
+| 持久安装 | ✅ 油猴脚本 / MV3 壳 | — | 刷新不失效；MV3 产物在 `dist/extension/` |
 | 标题打码 | — | ✅ `--mask-title` | 只影响报告，不改变快照内容 |
-| 断点续跑 | — | — | 见 roadmap M3 |
 
 ## 快速开始
 
 ```bash
 pnpm install
-pnpm build        # 产出 dist/dsx.user.js 与 dist/dsx-cli.mjs
-pnpm test         # 25 个单测
+pnpm build        # 产出 dist/dsx.user.js、dist/dsx-cli.mjs、dist/extension/
+pnpm test         # 44 个单测
 ```
+
+### 三种安装方式
+
+| 方式 | 步骤 | 适用 |
+|---|---|---|
+| MV3 扩展（推荐自用） | `chrome://extensions` → 打开开发者模式 → 加载已解压的扩展 → 选 `dist/extension` | 刷新不失效，权限最小 |
+| 油猴脚本 | 装 Tampermonkey / Violentmonkey，把 `dist/dsx.user.js` 拖进脚本管理页 | 跨浏览器，改脚本方便 |
+| 临时注入 | 开发者工具粘 `dist/dsx.user.js` 全文执行 | 只做一次验证 |
+
+MV3 壳没有额外权限：`content_scripts` 只匹配 `chat.deepseek.com`，不加 `host_permissions`，脚本走页面同源请求。
 
 ### 油猴端
 
@@ -52,11 +65,20 @@ npx playwright open --save-storage=auth.json https://chat.deepseek.com
 node dist/dsx-cli.mjs --state auth.json \
   --url "https://chat.deepseek.com/a/chat/s/<session-id>"
 
+# 只导出快照，不删除
+node dist/dsx-cli.mjs --state auth.json --url "<link>" --export-only
+
 # 批量：链接清单一行一条
 node dist/dsx-cli.mjs --state auth.json --file links.txt --apply --yes
+
+# 中断后续跑：跳过已完成、复用已有快照
+node dist/dsx-cli.mjs --state auth.json --file links.txt --apply --yes --resume
+
+# 加密快照（口令不进命令行、不进报告）
+DSX_SNAPSHOT_PASSWORD='...' node dist/dsx-cli.mjs --state auth.json --file links.txt --apply --yes --snapshot-encrypt
 ```
 
-也可用环境变量 `DSX_TOKEN` / `DSX_COOKIE` 代替 `--state`。常用选项见 `node dist/dsx-cli.mjs --help`；输出（`report.json`、`report.md`、`audit.jsonl`、`snapshots/`）默认写到 `./dsx-out`。
+也可用环境变量 `DSX_TOKEN` / `DSX_COOKIE` 代替 `--state`。常用选项见 `node dist/dsx-cli.mjs --help`；输出（`report.json`、`report.md`、`audit.jsonl`、`snapshots/`、`progress.json`）默认写到 `./dsx-out`。
 
 退出码：`0` 成功，`2` 部分失败或被拒绝，`3` 鉴权/接口失败。
 
@@ -73,7 +95,7 @@ node dist/dsx-cli.mjs --state auth.json --file links.txt --apply --yes
 | 置顶保护 | `pinned` 会话默认跳过，`--include-pinned` 才处理 |
 | 审计与脱敏 | 只记会话 id/标题/时间/结果；token、cookie 从不落盘；错误文本过 `redactSecrets` |
 
-**数据落在哪**：快照是明文全文，CLI 写在 `dsx-out/snapshots/`，油猴走浏览器下载目录；审计在 CLI 是 `audit.jsonl`，在油猴是 `chat.deepseek.com` 域下的 `localStorage`（只含会话 id、标题、时间、结果，不含凭证）。两处都由 `.gitignore` 或站点隔离兜住，但需要自己定期清理。
+**数据落在哪**：快照是明文全文，CLI 写在 `dsx-out/snapshots/`，油猴走浏览器下载目录；加 `--snapshot-encrypt` 后落盘的是 `*.enc.json`（scrypt 派生密钥 + AES-256-GCM，口令只存在环境变量）。审计在 CLI 是 `audit.jsonl`，在油猴是 `chat.deepseek.com` 域下的 `localStorage`（只含会话 id、标题、时间、结果，不含凭证）。两处都由 `.gitignore` 或站点隔离兜住，但需要自己定期清理。
 
 ## 已知边界
 
@@ -82,17 +104,19 @@ node dist/dsx-cli.mjs --state auth.json --file links.txt --apply --yes
 - **不承诺可还原**：快照留档用于查证；从快照重建会话需要逐条 completion 与 PoW，成本高且顺序难还原，未实现。
 - **风控**：高频删除可能触发验证码或临时限制；工具默认串行与分批，但不保证零风险。
 - **侧栏只渲染百余条**：实测同一账号接口返回千级会话、侧栏 DOM 只有百级（虚拟列表）。所以存在性判定只认 `fetch_page`，不认 DOM。
-- **明文留存**：快照与审计是明文落盘，`--mask-title` 只作用于报告；涉密会话请自行加密或删档。
+- **默认明文**：快照与审计默认是明文落盘；`--snapshot-encrypt` 只加密快照，审计仍明文（但只有 id、标题、时间、结果）。涉密会话建议开启加密并定期清档。
+- **加密口令不可找回**：`DSX_SNAPSHOT_PASSWORD` 丢了，`*.enc.json` 就解不开；文件头只有 KDF 参数，没有校验位以外的线索。
+- **MV3 壳不自动更新**：`dist/extension` 是本地加载的目录，代码更新后要在 `chrome://extensions` 点重新加载。
 
 ## 仓库结构
 
 ```
-src/core/        纯逻辑：parser / http / repository / guard / executor / snapshot / audit
-src/userscript/  油猴面板（Shadow DOM，单文件产物）
-src/cli/         命令行：参数、storageState 解析、报告
+src/core/        纯逻辑：parser / http / repository / guard / executor / snapshot / snapshot-crypto / audit
+src/userscript/  油猴面板与 MV3 content script 共用（Shadow DOM，单文件产物）
+src/cli/         命令行：参数、storageState 解析、断点续跑、报告
 tests/           vitest 单测
 docs/            方案、接口、选型、开源对照、开发计划
-scripts/build.mjs  esbuild 构建脚本
+scripts/build.mjs  esbuild 构建 + MV3 打包（dist/extension/）
 ```
 
 ## 文档
@@ -107,8 +131,8 @@ scripts/build.mjs  esbuild 构建脚本
 
 ```bash
 pnpm typecheck    # tsc --noEmit
-pnpm test         # vitest run
-pnpm build        # esbuild 双产物
+pnpm test         # vitest run（44 例）
+pnpm build        # esbuild + MV3 打包
 ```
 
 ## 免责声明
@@ -117,4 +141,4 @@ pnpm build        # esbuild 双产物
 
 ## English
 
-DSX is a link-driven session manager for DeepSeek's web chat. Paste a conversation link, verify it belongs to your account, snapshot it, then delete it — with rate limiting, dry-run by default, and a JSONL audit trail. Ships as a userscript and a CLI sharing one TypeScript core. Unofficial; self-hosted; your own account only.
+DSX is a link-driven session manager for DeepSeek's web chat. Paste a conversation link, verify it belongs to your account, snapshot it, then delete it — with rate limiting, dry-run by default, and a JSONL audit trail. Ships as a userscript, an MV3 extension shell, and a CLI sharing one TypeScript core. Also supports `--export-only` (backup without deleting), `--resume` (skip finished items), and AES-GCM encrypted snapshots. Unofficial; self-hosted; your own account only.

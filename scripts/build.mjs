@@ -1,5 +1,5 @@
 import { build } from 'esbuild';
-import { mkdirSync, readFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -43,4 +43,36 @@ await build({
   legalComments: 'none',
 });
 
-console.log('[build] dist/dsx.user.js, dist/dsx-cli.mjs');
+// MV3 shell: the userscript body already works as a content script (no GM_* APIs used),
+// so packaging is just "strip the ==UserScript== header, ship a manifest".
+const extensionDir = resolve(root, 'dist/extension');
+mkdirSync(extensionDir, { recursive: true });
+
+const userScriptBody = readFileSync(resolve(root, 'dist/dsx.user.js'), 'utf8').replace(
+  /^\/\/ ==UserScript==[\s\S]*?\/\/ ==\/UserScript==\n/,
+  '',
+);
+writeFileSync(resolve(extensionDir, 'dsx.js'), userScriptBody, 'utf8');
+writeFileSync(
+  resolve(extensionDir, 'manifest.json'),
+  JSON.stringify(
+    {
+      manifest_version: 3,
+      name: 'DSX - DeepSeek 会话管家',
+      version: pkg.version,
+      description: '输入 DeepSeek 会话链接，自动定位、快照、删除并审计',
+      content_scripts: [
+        {
+          matches: ['https://chat.deepseek.com/*'],
+          js: ['dsx.js'],
+          run_at: 'document_idle',
+        },
+      ],
+    },
+    null,
+    2,
+  ) + '\n',
+  'utf8',
+);
+
+console.log('[build] dist/dsx.user.js, dist/dsx-cli.mjs, dist/extension/');

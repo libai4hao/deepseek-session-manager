@@ -35,9 +35,12 @@
 | `src/core/guard.ts` | 归属与置顶校验 | `buildIndex`、`guardLink` |
 | `src/core/executor.ts` | 串行删除、限速、分批、重试、形态探测 | `deleteSession`、`runQueue` |
 | `src/core/snapshot.ts` | 删除前快照与文件命名 | `buildSnapshot`、`snapshotFileName` |
+| `src/core/snapshot-crypto.ts` | 快照加密/解密（Node 端） | `encryptSnapshot`、`decryptSnapshot`、`encryptedFileName` |
 | `src/core/audit.ts` | 审计事件、脱敏、id 哈希 | `toAuditLine`、`hashId`、`execResultToAudit` |
 | `src/core/auth.ts` | 从 `localStorage.userToken` 取 token | `tokenFromUserToken` |
 | `src/cli/state.ts` | 解析 Playwright storageState | `readStorageState` |
+| `src/cli/progress.ts` | 断点续跑账本 | `readProgress`、`completedIds`、`reusableSnapshots`、`mergeResults` |
+| `src/cli/report.ts` | 报告结构与 Markdown 渲染 | `renderMarkdown`、`ReportMode` |
 
 ## 状态机
 
@@ -55,7 +58,8 @@
  │  └─ 失败 ──→ 中止整批（除非显式 --no-snapshot）
  ▼
 预演 / 用户确认
- │  ├─ dry-run ──→ 输出清单后结束
+ │  ├─ dry-run ──→ 输出清单后结束（不拉消息、不写快照）
+ │  ├─ export-only ──→ 拉全文写快照后结束（永不调删除接口）
  │  └─ apply：>5 条需 --yes，>50 条直接拒绝
  ▼
 执行 runQueue（串行）
@@ -66,7 +70,7 @@
  ▼
 复核 verifyDeleted（重新拉列表，看是否还在）
  ▼
-审计 audit.jsonl + report.json/md
+审计 audit.jsonl + report.json/md + progress.json（断点续跑账本）
 ```
 
 ## 几个刻意的设计决定
@@ -83,6 +87,30 @@
 
 **6. "定位"分三档实现，但判定只认数据。** 批量场景完全不依赖 DOM：只要 `fetch_page` 里有这条会话就算存在。DOM 里的虚拟列表没渲染出某条，并不代表它不存在——拿 DOM 做存在性判断会误判。
 
+## 三种运行模式
+
+| 模式 | 触发 | 拉消息 | 写快照 | 调删除接口 | 写 progress |
+|---|---|---|---|---|---|
+| preflight | 默认 | 否 | 否 | 否 | 否 |
+| export | `--export-only` | 是 | 是 | **否** | 是 |
+| delete | `--apply` | 是（除非 `--no-snapshot`） | 是 | 是 | 是 |
+
+`--export-only` 与 `--apply` 互斥，参数解析阶段就拒绝；它存在的意义是让"只想备份、不敢删"的用户也能用同一条链路验证快照是否完整。
+
+## 断点续跑
+
+`progress.json`（`dsx.progress.v1`）按 session id 记账：
+
+- `deleted` / `skipped` → 视为完成，下次 `--resume` 直接跳过；
+- `failed` / `aborted` → 仍会重试；
+- `snapshotted` + `snapshot` 文件名 → 下次运行复用已有快照，不再拉一次全文。
+
+文件损坏或手改坏了不会崩：`readProgress` 解析失败就当作没有账本，从零开始。
+
+## MV3 打包
+
+`dist/extension/` = `manifest.json` + 去掉 `==UserScript==` 头的 `dsx.js`。因为核心不依赖任何 `GM_*` API，油猴态与 content script 态是同一份代码；MV3 里 `localStorage` 与页面共享，`fetch` 走页面同源，不需要额外 `host_permissions`。代价是改代码后要手动"重新加载"扩展，没有自动更新。
+
 ## 数据流示例（CLI）
 
 ```
@@ -96,5 +124,5 @@ fetch_page（分页，两套 cursor）─▶ SessionMeta[] ──┴─▶ build
                                                                       ▼
                                             verifyDeleted（再拉一次列表）
                                                                       │
-                                     report.json / report.md / audit.jsonl
+                                     report.json / report.md / audit.jsonl / progress.json
 ```

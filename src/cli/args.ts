@@ -12,6 +12,9 @@ export interface CliArgs {
   protectPinned: boolean;
   maskTitle: boolean;
   snapshot: boolean;
+  snapshotEncrypt: boolean;
+  resume: boolean;
+  exportOnly: boolean;
   help: boolean;
 }
 
@@ -26,6 +29,9 @@ const DEFAULTS: Omit<CliArgs, 'urls'> = {
   protectPinned: true,
   maskTitle: false,
   snapshot: true,
+  snapshotEncrypt: false,
+  resume: false,
+  exportOnly: false,
   help: false,
 };
 
@@ -46,8 +52,11 @@ export const USAGE = `DSX - DeepSeek 会话管家 (CLI)
 
 执行:
   --apply               真正执行删除（默认只预演，不调删除接口）
+  --export-only         只导出快照，不删除（与 --apply 互斥）
   --yes                 批量超过 5 条时必须显式确认
   --no-snapshot         不做删除前快照（默认做）
+  --snapshot-encrypt    快照加密（口令取环境变量 DSX_SNAPSHOT_PASSWORD）
+  --resume              断点续跑：跳过已完成项、复用已有快照（读 <out>/progress.json）
   --include-pinned      连置顶会话一起删（默认跳过）
   --mask-title          报告与审计中隐去标题
 
@@ -138,6 +147,15 @@ export function parseArgs(argv: string[]): CliArgs {
       case '--mask-title':
         args.maskTitle = true;
         break;
+      case '--snapshot-encrypt':
+        args.snapshotEncrypt = true;
+        break;
+      case '--resume':
+        args.resume = true;
+        break;
+      case '--export-only':
+        args.exportOnly = true;
+        break;
       case '--help':
       case '-h':
         args.help = true;
@@ -145,6 +163,16 @@ export function parseArgs(argv: string[]): CliArgs {
       default:
         throw new Error(`未知参数：${flag}`);
     }
+  }
+
+  if (args.exportOnly && args.apply) {
+    throw new Error('--export-only 与 --apply 互斥：要么只导出，要么删除。');
+  }
+  if (args.exportOnly && !args.snapshot) {
+    throw new Error('--export-only 的唯一产出就是快照，不能同时用 --no-snapshot。');
+  }
+  if (args.snapshotEncrypt && !args.snapshot) {
+    throw new Error('--snapshot-encrypt 需要开启快照，不能同时用 --no-snapshot。');
   }
 
   return args;

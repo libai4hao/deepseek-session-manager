@@ -8,11 +8,13 @@ import { buildIndex, guardLink } from '../core/guard';
 import { getAccountId, getMessages, listSessions, verifyDeleted } from '../core/repository';
 import { runQueue } from '../core/executor';
 import { buildSnapshot, snapshotFileName } from '../core/snapshot';
+import { encryptSnapshot, encryptedFileName } from '../core/snapshot-crypto';
 import { execResultToAudit, hashId, toAuditLine, type AuditEvent } from '../core/audit';
 import type { ExecResult, SessionMeta } from '../core/types';
 import { parseArgs, USAGE, type CliArgs } from './args';
+import { completedIds, markSnapshots, mergeResults, progressPath, readProgress, reusableSnapshots, writeProgress } from './progress';
 import { readStorageState, type AccountState } from './state';
-import { renderMarkdown, type PlanItem, type Report } from './report';
+import { renderMarkdown, type PlanItem, type Report, type ReportMode } from './report';
 
 const BASE_URL = 'https://chat.deepseek.com';
 const HARD_BATCH_LIMIT = 50;
@@ -52,7 +54,7 @@ function printPlan(items: PlanItem[]): void {
   console.log(padRight('结果', 8) + padRight('标题', 34) + padRight('更新时间', 20) + '会话 ID');
   console.log('-'.repeat(104));
   for (const item of items) {
-    const status = item.action === 'delete' ? '待删除' : '已拒绝';
+    const status = item.action === 'delete' ? '待删除' : item.action === 'skip' ? '已跳过' : '已拒绝';
     console.log(
       padRight(status, 8) +
         padRight(item.title ?? item.id ?? '-', 34) +
@@ -76,6 +78,12 @@ async function main(): Promise<number> {
   if (args.help) {
     console.log(USAGE);
     return 0;
+  }
+
+  const snapshotPassword = args.snapshotEncrypt ? process.env.DSX_SNAPSHOT_PASSWORD : undefined;
+  if (args.snapshotEncrypt && !snapshotPassword) {
+    console.error('--snapshot-encrypt 需要口令：请设置环境变量 DSX_SNAPSHOT_PASSWORD 后重试。');
+    return 2;
   }
 
   const rawLinks: string[] = [...args.urls];
@@ -131,20 +139,36 @@ async function main(): Promise<number> {
   const metaById = new Map(sessions.map(session => [session.id, session]));
   const links = dedupeLinks(parseLinks(rawLinks));
 
+  const mode: ReportMode = args.exportOnly ? 'export' : args.apply ? 'delete' : 'preflight';
+  const writing = mode !== 'preflight';
+  const outDir = args.out;
+
+  const storedProgress = args.resume && writing ? readProgress(progressPath(outDir)) : undefined;
+  const doneIds = completedIds(storedProgress);
+
   const plan: PlanItem[] = links.map(link => {
     const outcome = guardLink(link, index, { protectPinned: args.protectPinned });
 
     if (outcome.ok && outcome.meta) {
-      return {
+      const base = {
         link: link.raw,
         kind: link.kind,
         id: outcome.meta.id,
         title: maskTitle(outcome.meta.title, args.maskTitle),
         updatedAt: outcome.meta.updatedAt,
         pinned: outcome.meta.pinned,
-        action: 'delete',
-        detail: '归属校验通过',
       };
+
+      if (doneIds.has(outcome.meta.id)) {
+        return {
+          ...base,
+          action: 'skip',
+          code: 'RESUME_DONE',
+          detail: '断点续跑：该会话已完成，跳过',
+        };
+      }
+
+      return { ...base, action: 'delete', detail: '归属校验通过' };
     }
 
     return {
@@ -162,21 +186,28 @@ async function main(): Promise<number> {
 
   const deletable = plan.filter(item => item.action === 'delete');
   const ids = deletable.map(item => item.id as string);
+  const resumeSkipped = plan.filter(item => item.action === 'skip').length;
 
-  if (args.apply && ids.length > HARD_BATCH_LIMIT) {
-    console.error(`\n待删除 ${ids.length} 条，超过单次上限 ${HARD_BATCH_LIMIT}，请拆分成多次执行。`);
+  if (resumeSkipped > 0) console.log(`断点续跑：跳过 ${resumeSkipped} 条已完成项`);
+
+  if (writing && ids.length > HARD_BATCH_LIMIT) {
+    console.error(`\n待处理 ${ids.length} 条，超过单次上限 ${HARD_BATCH_LIMIT}，请拆分成多次执行。`);
     return 2;
   }
 
-  const isDryRun = !args.apply;
-  if (isDryRun) {
-    console.log(`\n预演完成：${deletable.length} 条可删、${plan.length - deletable.length} 条被拒绝。未调用删除接口。`);
-  } else if (ids.length > CONFIRM_THRESHOLD && !args.yes) {
+  if (mode === 'preflight') {
+    console.log(
+      `\n预演完成：${deletable.length} 条可删、${plan.filter(item => item.action === 'reject').length} 条被拒绝` +
+        `${resumeSkipped > 0 ? `、${resumeSkipped} 条已完成跳过` : ''}。未调用删除接口，也未写快照。`,
+    );
+  } else if (mode === 'delete' && ids.length > CONFIRM_THRESHOLD && !args.yes) {
     console.error(`\n待删除 ${ids.length} 条（> ${CONFIRM_THRESHOLD}），需要 --yes 显式确认。`);
     return 2;
+  } else if (mode === 'export') {
+    console.log(`\n仅导出模式：${deletable.length} 条会话将写入快照，不会调用删除接口。`);
   }
 
-  const outDir = args.out;
+
   mkdirSync(outDir, { recursive: true });
 
   const now = new Date().toISOString();
@@ -192,9 +223,11 @@ async function main(): Promise<number> {
   }));
 
   const snapshotFiles = new Map<string, string>();
+  const exportFailures = new Set<string>();
+  const reusable = args.resume && writing ? reusableSnapshots(storedProgress, join(outDir, 'snapshots')) : new Map<string, string>();
 
   // Snapshots are generated only on a real run: preflight must stay read-only.
-  if (args.apply && args.snapshot && ids.length > 0) {
+  if (writing && args.snapshot && ids.length > 0) {
     const snapshotDir = join(outDir, 'snapshots');
     mkdirSync(snapshotDir, { recursive: true });
 
@@ -202,25 +235,49 @@ async function main(): Promise<number> {
       const meta = metaById.get(id);
       if (!meta) continue;
 
+      const reused = reusable.get(id);
+      if (reused) {
+        snapshotFiles.set(id, reused);
+        console.log(`[snapshot] 复用 ${reused}`);
+        continue;
+      }
+
       try {
         const messages = await getMessages(transport, id);
         const snapshot = buildSnapshot(meta, messages);
-        const fileName = snapshotFileName(meta);
-        writeFileSync(join(snapshotDir, fileName), JSON.stringify(snapshot, null, 2), 'utf8');
+        const plainName = snapshotFileName(meta);
+        const fileName = snapshotPassword ? encryptedFileName(plainName) : plainName;
+        const body = snapshotPassword
+          ? JSON.stringify(encryptSnapshot(snapshot, snapshotPassword), null, 2)
+          : JSON.stringify(snapshot, null, 2);
+
+        writeFileSync(join(snapshotDir, fileName), body, 'utf8');
         snapshotFiles.set(id, fileName);
-        console.log(`[snapshot] ${fileName}（${snapshot.messageCount} 段）`);
+        console.log(`[snapshot] ${fileName}（${snapshot.messageCount} 段${snapshotPassword ? '，已加密' : ''}）`);
       } catch (error) {
         console.error(`[snapshot] ${id} 快照失败：${String(error)}`);
-        console.error('删除前快照失败，已中止。确认无需快照时可加 --no-snapshot。');
-        writeFileSync(join(outDir, 'report.json'), JSON.stringify({ error: 'snapshot-failed', id }, null, 2));
-        return 3;
+        if (mode === 'delete') {
+          console.error('删除前快照失败，已中止。确认无需快照时可加 --no-snapshot。');
+          writeFileSync(join(outDir, 'report.json'), JSON.stringify({ error: 'snapshot-failed', id }, null, 2));
+          return 3;
+        }
+        exportFailures.add(id);
       }
+    }
+  }
+
+  if (mode === 'export') {
+    for (const item of plan) {
+      if (item.action !== 'delete' || !item.id) continue;
+      const file = snapshotFiles.get(item.id);
+      item.detail = file ? `已导出 ${file}` : exportFailures.has(item.id) ? '导出失败' : '未导出';
+      if (file) console.log(`[export] ${file}`);
     }
   }
 
   let results: ExecResult[] = [];
 
-  if (args.apply && ids.length > 0) {
+  if (mode === 'delete' && ids.length > 0) {
     console.log('');
     results = await runQueue(
       transport,
@@ -252,7 +309,7 @@ async function main(): Promise<number> {
   }
 
   let verify: Array<{ id: string; stillThere: boolean }> | undefined;
-  if (args.apply && ids.length > 0) {
+  if (mode === 'delete' && ids.length > 0) {
     try {
       verify = await verifyDeleted(transport, ids);
       for (const entry of verify) {
@@ -273,14 +330,25 @@ async function main(): Promise<number> {
   const failed = results.filter(result => result.status === 'failed' || result.status === 'aborted');
   const stillThere = verify?.filter(entry => entry.stillThere) ?? [];
 
+  if (writing) {
+    let progress = storedProgress;
+    if (snapshotFiles.size > 0) progress = markSnapshots(progress, snapshotFiles);
+    if (results.length > 0) progress = mergeResults(progress, results, snapshotFiles);
+    if (progress) {
+      if (accountHash && !progress.accountHash) progress.accountHash = accountHash;
+      writeProgress(progressPath(outDir), progress);
+    }
+  }
+
   const report: Report = {
     schema: 'dsx.report.v1',
     generatedAt: new Date().toISOString(),
-    dryRun: isDryRun,
+    mode,
+    dryRun: mode === 'preflight',
     accountHash,
     total: plan.length,
     deletable: deletable.length,
-    rejected: plan.length - deletable.length,
+    rejected: plan.filter(item => item.action === 'reject').length,
     items: plan,
     results: results.length > 0 ? results : undefined,
     verify,
@@ -290,6 +358,8 @@ async function main(): Promise<number> {
       aborted: failed.filter(result => result.status === 'aborted').length,
       skipped: results.filter(result => result.status === 'skipped').length,
       stillThere: stillThere.length,
+      exported: mode === 'export' ? snapshotFiles.size : undefined,
+      exportFailed: mode === 'export' ? exportFailures.size : undefined,
     },
   };
 
@@ -297,14 +367,17 @@ async function main(): Promise<number> {
   writeFileSync(join(outDir, 'report.md'), renderMarkdown(report), 'utf8');
   writeFileSync(join(outDir, 'audit.jsonl'), auditEvents.map(toAuditLine).join('\n') + '\n', 'utf8');
 
-  if (results.length > 0) {
+  if (mode === 'export') {
+    console.log(`\n汇总：导出 ${snapshotFiles.size} 条，失败 ${exportFailures.size} 条；未删除任何会话。`);
+  } else if (results.length > 0) {
     console.log(
       `\n汇总：删除 ${report.summary?.deleted ?? 0}，失败 ${report.summary?.failed ?? 0}，中止 ${report.summary?.aborted ?? 0}，删除后仍存在 ${report.summary?.stillThere ?? 0}`,
     );
   }
   console.log(`报告与审计已写入 ${outDir}`);
 
-  if (plan.length > 0 && deletable.length === 0 && args.apply) return 2;
+  if (mode === 'export') return exportFailures.size > 0 ? 2 : 0;
+  if (mode === 'delete' && plan.length > 0 && deletable.length === 0) return 2;
   return failed.length > 0 || stillThere.length > 0 ? 2 : 0;
 }
 
