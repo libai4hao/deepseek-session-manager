@@ -6,6 +6,7 @@ import { buildIndex, guardLink } from '../core/guard';
 import { getMessages, listSessions, verifyDeleted } from '../core/repository';
 import { runQueue } from '../core/executor';
 import { buildSnapshot } from '../core/snapshot';
+import { locateSession, sessionIdFromHref } from './sidebar';
 import type { ExecResult, ParsedLink, SessionMeta, Transport } from '../core/types';
 import { toAuditLine, type AuditEvent } from '../core/audit';
 
@@ -123,6 +124,8 @@ function mountPanel(): void {
       .rows { max-height: 34vh; overflow: auto; border-top: 1px solid #f3f4f6; }
       .row { display: grid; grid-template-columns: 44px 1fr 74px; gap: 6px; padding: 7px 12px; border-bottom: 1px solid #f9fafb;
              align-items: center; }
+      .row[data-locate] { cursor: pointer; }
+      .row[data-locate]:hover { background: #fffbeb; }
       .row .tag { font-size: 11px; text-align: center; border-radius: 4px; padding: 1px 0; }
       .row .ok { background: #ecfdf5; color: #047857; }
       .row .reject { background: #fef2f2; color: #b91c1c; }
@@ -136,11 +139,12 @@ function mountPanel(): void {
     <div class="wrap">
       <div class="ball">DSX</div>
       <div class="panel">
-        <div class="head"><span>DeepSeek 会话管家<small>链接 → 校验 → 快照 → 删除</small></span><span class="x">×</span></div>
+        <div class="head"><span>DeepSeek 会话管家<small>链接 → 侧栏定位 → 删除</small></span><span class="x">×</span></div>
         <textarea placeholder="每行一个会话链接，例如：&#10;https://chat.deepseek.com/a/chat/s/&lt;id&gt;"></textarea>
         <div class="bar">
-          <button id="fill">当前会话</button>
+          <button id="fill">定位当前会话</button>
           <button id="preview">解析并预览</button>
+          <button id="locate">定位侧栏</button>
           <label class="dry"><input type="checkbox" id="dry" checked>仅预演</label>
         </div>
         <div class="rows"><div class="empty">粘贴链接后点「解析并预览」。</div></div>
@@ -164,6 +168,7 @@ function mountPanel(): void {
   const previewBtn = shadow.querySelector<HTMLButtonElement>('#preview')!;
   const auditBtn = shadow.querySelector<HTMLButtonElement>('#audit')!;
   const fillBtn = shadow.querySelector<HTMLButtonElement>('#fill')!;
+  const locateBtn = shadow.querySelector<HTMLButtonElement>('#locate')!;
 
   const setHint = (text: string): void => {
     hint.textContent = text;
@@ -174,7 +179,32 @@ function mountPanel(): void {
 
   fillBtn.addEventListener('click', () => {
     textarea.value = location.href;
-    setHint('已填入当前地址');
+    void locate(sessionIdFromHref(location.href) ?? undefined);
+  });
+
+  const locate = async (id?: string): Promise<void> => {
+    const target = id ?? state.rows.find(row => row.status === 'ok' && row.id)?.id;
+    if (!target) {
+      setHint('没有可定位条目，先解析预览');
+      return;
+    }
+
+    setHint('在左侧会话栏定位…');
+    const outcome = await locateSession(target);
+    const short = target.slice(0, 8);
+
+    if (outcome.found) {
+      setHint(`已在侧栏定位 ${short}${outcome.scrolled ? `（滚动 ${outcome.steps} 步）` : ''}`);
+    } else {
+      setHint('侧栏只加载常用的约百条，未包含该会话；接口已确认存在，可直接删除');
+    }
+  };
+
+  locateBtn.addEventListener('click', () => void locate());
+  rowsBox.addEventListener('click', event => {
+    const row = (event.target as HTMLElement).closest<HTMLElement>('[data-locate]');
+    const id = row?.dataset.locate;
+    if (id) void locate(id);
   });
 
   auditBtn.addEventListener('click', () => {
@@ -212,7 +242,7 @@ function mountPanel(): void {
           ? escapeHtml(row.detail)
           : `${escapeHtml(formatTime(row.updatedAt))}${row.pinned ? ' · 置顶' : ''}`;
 
-        return `<div class="row">
+        return `<div class="row"${row.id && row.status === 'ok' ? ` data-locate="${escapeHtml(row.id)}" title="点一下在左侧会话栏定位"` : ''}>
           <span class="tag ${tag}">${escapeHtml(label)}</span>
           <span><span class="title">${escapeHtml(row.title)}</span><br><span class="sub">${sub}</span></span>
           <span class="sub">${escapeHtml((row.id ?? '-').slice(0, 8))}</span>
@@ -230,6 +260,7 @@ function mountPanel(): void {
 
     previewBtn.disabled = true;
     applyBtn.disabled = true;
+    locateBtn.disabled = true;
     setHint('读取会话列表…');
 
     try {
@@ -263,12 +294,24 @@ function mountPanel(): void {
 
       renderRows();
       const okCount = state.rows.filter(row => row.status === 'ok').length;
-      setHint(`${state.sessions.length} 条会话可用，本次可删 ${okCount} 条`);
+      const okRows = state.rows.filter(row => row.status === 'ok' && row.id);
+      let suffix = '';
+
+      // Single target: locate it in the sidebar right away, that is the primary job.
+      if (okRows.length === 1) {
+        const located = await locateSession(okRows[0].id as string);
+        okRows[0].detail = located.found ? '已定位到左侧会话栏' : '接口已确认存在（侧栏未加载该条）';
+        renderRows();
+        suffix = located.found ? '，已定位到侧栏' : '，侧栏未加载该条';
+      }
+
+      setHint(`${state.sessions.length} 条会话可用，本次可删 ${okCount} 条${suffix}`);
     } catch (error) {
       setHint(`失败：${(error as Error).message}`);
     } finally {
       previewBtn.disabled = false;
       applyBtn.disabled = false;
+      locateBtn.disabled = false;
     }
   };
 
@@ -376,6 +419,14 @@ function boot(): void {
     return;
   }
   mountPanel();
+
+  // Feature 1: highlight the conversation you are currently reading in the sidebar.
+  const currentId = sessionIdFromHref(location.href);
+  if (currentId) {
+    window.setTimeout(() => {
+      void locateSession(currentId);
+    }, 700);
+  }
 }
 
 if (document.readyState === 'loading') {

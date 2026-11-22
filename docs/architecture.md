@@ -41,6 +41,7 @@
 | `src/cli/snapshot-crypto.ts` | 快照加密/解密（Node `crypto`，仅 CLI） | `encryptSnapshot`、`decryptSnapshot`、`encryptedFileName` |
 | `src/cli/progress.ts` | 断点续跑账本 | `readProgress`、`completedIds`、`reusableSnapshots`、`mergeResults` |
 | `src/cli/report.ts` | 报告结构与 Markdown 渲染 | `renderMarkdown`、`ReportMode` |
+| `src/userscript/sidebar.ts` | 侧栏滚动定位与高亮（仅油猴） | `locateSession`、`sessionIdFromHref` |
 
 ## 状态机
 
@@ -50,6 +51,8 @@
  ├─ 非法 / 分享页 / 外站 ──→ 拒绝（不进队列，报告里标 reject）
  │
  ▼ 本人会话链接
+侧栏定位（仅油猴）：已加载条目内滚动 + 高亮；找不到只提示，不阻断
+ ▼
 归属校验 guardLink
  │  ├─ 列表未命中 ──→ NOT_FOUND（跳过，不盲删）
  │  └─ 置顶且保护 ──→ PINNED_PROTECTED
@@ -85,7 +88,7 @@
 
 **5. 侧栏不拆 DOM。** 删除后前端状态仍持有节点，手工 `remove()` 会导致列表错乱；油猴端删完只重拉列表，不碰 React 的节点。
 
-**6. "定位"分三档实现，但判定只认数据。** 批量场景完全不依赖 DOM：只要 `fetch_page` 里有这条会话就算存在。DOM 里的虚拟列表没渲染出某条，并不代表它不存在——拿 DOM 做存在性判断会误判。
+**6. 定位是 UI 增强，判定仍以数据为准。** 油猴端做两件事：进会话页自动把当前会话在侧栏高亮；解析链接后滚动定位目标条目，点行或点按钮可重定位。实测侧栏只加载约 100 条，滚动不会追加加载，所以老会话可能根本不在 DOM 里：定位失败只提示“侧栏未加载”，绝不阻断删除；会话到底在不在，只认 `fetch_page`。定位只滚动与高亮，不 `remove()`、不点击跳转。
 
 ## 三种运行模式
 

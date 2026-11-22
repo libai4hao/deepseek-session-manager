@@ -3,16 +3,22 @@
 [![CI](https://github.com/libai4hao/deepseek-session-manager/actions/workflows/ci.yml/badge.svg)](https://github.com/libai4hao/deepseek-session-manager/actions/workflows/ci.yml)
 [![Release](https://github.com/libai4hao/deepseek-session-manager/actions/workflows/release.yml/badge.svg)](https://github.com/libai4hao/deepseek-session-manager/actions/workflows/release.yml)
 
-把一条会话链接，变成一个**可校验、可留档、可审计**的删除动作。
+一个给 DeepSeek 网页版打的增强补丁，只做两件事：
 
-DeepSeek 网页版没有"给个链接就把这条会话处理掉"的能力：侧栏翻找靠肉眼，删除靠手点，删了什么没人记得。DSX 把这件事拆成六步——解析、归属校验、快照、确认、删除、审计——并做成油猴面板与命令行两端，共用同一套核心逻辑。
+1. **定位当前会话**：你正在读的这条会话，在左侧会话栏里高亮出来并滚到可见位置——长列表里翻找自己刚才那条，本来要靠肉眼。
+2. **删除指定链接的会话**：粘贴一条本人会话链接，校验归属后删除这条个人聊天会话。
 
-> 非官方工具，基于网页端内部接口；只对**本人账号**的会话生效，不做多账号代操作。
+预演、快照、审计、限速不是目的，是第 2 件事的安全护栏。两端共用一套核心：油猴面板管单条、要人眼核对标题；CLI 管批量、要留档。
+
+> 非官方增强，基于网页端内部接口；只对**本人账号**的会话生效，不做多账号代操作。
 
 ## 功能清单
 
 | 功能 | 油猴 | CLI | 说明与边界 |
 |---|---|---|---|
+| 定位当前会话 | ✅ 进页自动高亮，按钮可重定位 | — | 侧栏只加载常用约百条；范围内可定位，范围外只提示，不阻断删除 |
+| 定位指定链接 | ✅ 点预览行 / 点「定位侧栏」 | — | CLI 没有 UI，只按 session id 处理 |
+| 删除指定链接会话 | ✅ | ✅ | 归属校验 + 快照 + 审计，见下方各闸门 |
 | 链接解析 | ✅ | ✅ | 分 session / share / foreign / bad 四类；仿冒域名按 hostname 全等判定 |
 | 裸 uuid 输入 | ✅ | ✅ | 无标题可核对，批量时仍逐条展示命中标题 |
 | 分享页拒绝 | ✅ | ✅ | `/share/` 只读，无接口权限 |
@@ -38,7 +44,7 @@ DeepSeek 网页版没有"给个链接就把这条会话处理掉"的能力：侧
 ```bash
 pnpm install
 pnpm build        # 产出 dist/dsx.user.js、dist/dsx-cli.mjs、dist/extension/
-pnpm test         # 44 个单测
+pnpm test         # 47 个单测
 ```
 
 ### 三种安装方式
@@ -56,8 +62,8 @@ MV3 壳没有额外权限：`content_scripts` 只匹配 `chat.deepseek.com`，�
 
 1. 浏览器安装 Tampermonkey / Violentmonkey
 2. 把 `dist/dsx.user.js` 拖进扩展的脚本管理页安装
-3. 打开 `chat.deepseek.com` 任意会话，右下角出现 `DSX` 悬浮球
-4. 粘贴会话链接 → **解析并预览** → 看清标题与时间 → 取消"仅预演" → 执行删除
+3. 打开 `chat.deepseek.com` 任意会话，当前会话会在左侧会话栏自动高亮，右下角出现 `DSX` 悬浮球
+4. 粘贴会话链接 → **解析并预览**（单条会自动滚到侧栏对应条目并高亮）→ 看清标题与时间 → 取消"仅预演" → 执行删除
 
 ### CLI 端
 
@@ -107,7 +113,7 @@ DSX_SNAPSHOT_PASSWORD='...' node dist/dsx-cli.mjs --state auth.json --file links
 - **分享页只读**，`/share/...` 无接口权限，只能定位与提取。
 - **不承诺可还原**：快照留档用于查证；从快照重建会话需要逐条 completion 与 PoW，成本高且顺序难还原，未实现。
 - **风控**：高频删除可能触发验证码或临时限制；工具默认串行与分批，但不保证零风险。
-- **侧栏只渲染百余条**：实测同一账号接口返回千级会话、侧栏 DOM 只有百级（虚拟列表）。所以存在性判定只认 `fetch_page`，不认 DOM。
+- **侧栏不是无限列表**：实测只加载约 100 条（滚动容器可滚，但滚动不会加载更多），更早的会话只在接口里有。所以定位只在已加载范围内有效，找不到时提示“侧栏未加载”，存在性仍只认 `fetch_page`，不影响删除。
 - **默认明文**：快照与审计默认是明文落盘；`--snapshot-encrypt` 只加密快照，审计仍明文（但只有 id、标题、时间、结果）。涉密会话建议开启加密并定期清档。
 - **加密口令不可找回**：`DSX_SNAPSHOT_PASSWORD` 丢了，`*.enc.json` 就解不开；文件头只有 KDF 参数，没有校验位以外的线索。
 - **MV3 壳不自动更新**：`dist/extension` 是本地加载的目录，代码更新后要在 `chrome://extensions` 点重新加载。
@@ -136,7 +142,7 @@ scripts/build.mjs  esbuild 构建 + MV3 打包（dist/extension/）
 
 ```bash
 pnpm typecheck    # tsc --noEmit
-pnpm test         # vitest run（44 例）
+pnpm test         # vitest run（47 例）
 pnpm build        # esbuild + MV3 打包
 ```
 
@@ -146,4 +152,4 @@ pnpm build        # esbuild + MV3 打包
 
 ## English
 
-DSX is a link-driven session manager for DeepSeek's web chat. Paste a conversation link, verify it belongs to your account, snapshot it, then delete it — with rate limiting, dry-run by default, and a JSONL audit trail. Ships as a userscript, an MV3 extension shell, and a CLI sharing one TypeScript core. Also supports `--export-only` (backup without deleting), `--resume` (skip finished items), and AES-GCM encrypted snapshots. Unofficial; self-hosted; your own account only.
+DSX is a small enhancement layer for DeepSeek's web chat with exactly two jobs: highlight the conversation you are currently reading in the left sidebar, and delete the personal session behind a given chat URL — with ownership checks, dry-run by default, snapshots, rate limiting and a JSONL audit trail. Ships as a userscript, an MV3 extension shell, and a CLI sharing one TypeScript core. Also supports `--export-only`, `--resume`, and AES-GCM encrypted snapshots. Unofficial; self-hosted; your own account only.
