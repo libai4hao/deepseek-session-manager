@@ -46,18 +46,13 @@ function findToken(state: StorageStateFile): string | undefined {
 
   for (const origin of origins) {
     const host = safeHost(origin.origin);
-    if (!host.includes('deepseek.com')) continue;
+    if (!isDeepSeekHost(host)) continue;
     const entry = (origin.localStorage ?? []).find(item => item.name === 'userToken');
     const token = tokenFromUserToken(entry?.value);
     if (token) return token;
   }
 
-  // Fallback: scan every origin, in case the page was opened under another host.
-  for (const origin of origins) {
-    const entry = (origin.localStorage ?? []).find(item => item.name === 'userToken');
-    const token = tokenFromUserToken(entry?.value);
-    if (token) return token;
-  }
+
 
   return undefined;
 }
@@ -65,10 +60,19 @@ function findToken(state: StorageStateFile): string | undefined {
 function buildCookieHeader(state: StorageStateFile): string {
   const cookies = (state.cookies ?? []).filter(cookie => {
     const domain = (cookie.domain ?? '').toLowerCase();
-    return Boolean(cookie.name && cookie.value) && domain.includes('deepseek.com');
+    return Boolean(cookie.name && cookie.value) && isDeepSeekCookieDomain(domain);
   });
 
   return cookies.map(cookie => `${cookie.name}=${cookie.value}`).join('; ');
+}
+
+function isDeepSeekHost(host: string): boolean {
+  return host === 'deepseek.com' || host.endsWith('.deepseek.com');
+}
+
+function isDeepSeekCookieDomain(domain: string): boolean {
+  const normalized = domain.replace(/^\./, '');
+  return normalized === 'deepseek.com' || normalized.endsWith('.deepseek.com');
 }
 
 function safeHost(origin?: string): string {

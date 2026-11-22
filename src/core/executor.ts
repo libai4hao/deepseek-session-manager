@@ -67,12 +67,17 @@ export async function runQueue(
       try {
         response = await deleteSession(transport, id, shape.current === 'auto' ? 'single' : shape.current);
       } catch (error) {
-        lastReason = error instanceof Error ? error.message : 'NETWORK';
+        // Distinguish a hung connection from an HTTP-level failure so reports stay diagnosable.
+        const message = error instanceof Error ? error.message : 'NETWORK';
+        const isTimeout = error instanceof Error && (error.name === 'AbortError' || message.includes('超时'));
+        lastReason = isTimeout ? `TIMEOUT: ${message}` : message;
       }
       lastMs = Date.now() - started;
 
       if (!response) {
-        await sleep(backoff[Math.min(attempts - 1, backoff.length - 1)] ?? 4000);
+        if (attempts < options.retries + 1) {
+          await sleep(backoff[Math.min(attempts - 1, backoff.length - 1)] ?? 4000);
+        }
         continue;
       }
 
@@ -112,9 +117,11 @@ export async function runQueue(
       lastReason = kind.toUpperCase();
 
       if (kind === 'forbidden') {
-        await sleep(cooldownMs);
+        if (attempts < options.retries + 1) await sleep(cooldownMs);
       } else if (kind === 'rate' || kind === 'server') {
-        await sleep(backoff[Math.min(attempts - 1, backoff.length - 1)] ?? 4000);
+        if (attempts < options.retries + 1) {
+          await sleep(backoff[Math.min(attempts - 1, backoff.length - 1)] ?? 4000);
+        }
       } else {
         outcome = { id, status: 'failed', attempts, ms: lastMs, reason: response.bizMsg ?? kind };
       }

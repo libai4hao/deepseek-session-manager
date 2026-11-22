@@ -26,7 +26,20 @@ describe('cli args', () => {
     expect(() => parseArgs(['--url', 'x', '--export-only', '--no-snapshot'])).toThrow(/不能同时/);
   });
 
+  it('requires integer bounded execution parameters', () => {
+    expect(() => parseArgs(['--url', 'x', '--batch-size', '0'])).toThrow(/batch-size/);
+    expect(() => parseArgs(['--url', 'x', '--batch-size', '1.5'])).toThrow(/整数/);
+    expect(() => parseArgs(['--url', 'x', '--retries', '1.5'])).toThrow(/整数/);
+    expect(() => parseArgs(['--url', 'x', '--retries', '21'])).toThrow(/不能超过/);
+  });
+
   it('refuses encryption without snapshots', () => {
     expect(() => parseArgs(['--url', 'x', '--snapshot-encrypt', '--no-snapshot'])).toThrow(/不能同时/);
+  });
+
+  it('bounds the request timeout', () => {
+    expect(parseArgs(['--url', 'x', '--timeout', '5000']).timeoutMs).toBe(5000);
+    expect(() => parseArgs(['--url', 'x', '--timeout', '999'])).toThrow(/timeout/);
+    expect(() => parseArgs(['--url', 'x', '--timeout', '600001'])).toThrow(/timeout/);
   });
 });

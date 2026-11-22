@@ -35,7 +35,7 @@
 | 删后复核 | ✅ | ✅ | 重拉列表看是否仍在 |
 | 审计 | ✅ 本地存储 + 下载 | ✅ `audit.jsonl` | 脱敏，账号只存 sha256 前 8 字节 |
 | 批量确认 | ✅ >5 条输入 `DELETE` | ✅ `--yes` | 单次硬上限 50 条 |
-| 断点续跑 | — | ✅ `--resume` | 读 `<out>/progress.json`：跳过已完成、复用已有快照 |
+| 断点续跑 | — | ✅ `--resume` | 读 `<out>/progress.json`：跳过已完成、复用已有快照；账号指纹不符直接中止 |
 | 持久安装 | ✅ 油猴 / MV3 壳 | — | 刷新不失效；MV3 产物在 `dist/extension/` |
 | 标题打码 | — | ✅ `--mask-title` | 同时作用于报告与审计；不改变快照内容 |
 
@@ -44,7 +44,7 @@
 ```bash
 pnpm install
 pnpm build        # 产出 dist/dsx.user.js、dist/dsx-cli.mjs、dist/extension/
-pnpm test         # 47 个单测
+pnpm test         # 58 个单测
 ```
 
 ### 三种安装方式
@@ -142,7 +142,7 @@ scripts/build.mjs  esbuild 构建 + MV3 打包（dist/extension/）
 
 ```bash
 pnpm typecheck    # tsc --noEmit
-pnpm test         # vitest run（47 例）
+pnpm test         # vitest run（58 例）
 pnpm build        # esbuild + MV3 打包
 ```
 

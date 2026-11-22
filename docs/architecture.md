@@ -39,7 +39,7 @@
 | `src/core/auth.ts` | 从 `localStorage.userToken` 取 token | `tokenFromUserToken` |
 | `src/cli/state.ts` | 解析 Playwright storageState | `readStorageState` |
 | `src/cli/snapshot-crypto.ts` | 快照加密/解密（Node `crypto`，仅 CLI） | `encryptSnapshot`、`decryptSnapshot`、`encryptedFileName` |
-| `src/cli/progress.ts` | 断点续跑账本 | `readProgress`、`completedIds`、`reusableSnapshots`、`mergeResults` |
+| `src/cli/progress.ts` | 断点续跑账本 | `readProgress`、`completedIds`、`checkResumeAccount`、`reusableSnapshots`、`mergeResults` |
 | `src/cli/report.ts` | 报告结构与 Markdown 渲染 | `renderMarkdown`、`ReportMode` |
 | `src/userscript/sidebar.ts` | 侧栏滚动定位与高亮（仅油猴） | `locateSession`、`sessionIdFromHref` |
 
@@ -108,7 +108,27 @@
 - `failed` / `aborted` → 仍会重试；
 - `snapshotted` + `snapshot` 文件名 → 下次运行复用已有快照，不再拉一次全文。
 
-文件损坏或手改坏了不会崩：`readProgress` 解析失败就当作没有账本，从零开始。
+三个防误删约束：
+
+1. **账号隔离。** 账本写入当前账号指纹（`accountHash`）。`--resume` 时当前指纹与账本不一致、任一方缺失，都直接 `exit 3`，不给"换账号接着删"留口子。
+2. **快照复用要过完整性。** 文件名必须留在 `snapshots/` 内（拒绝 `../`），明文快照必须能解析且 `schema` 与 `id` 对得上，加密快照至少要求非空；任何一项不符就重新抓取，而不是拿旧文件当证据。
+3. **原子落盘。** 先写 `progress.json.tmp-<pid>`（`wx` 独占），再 `rename` 覆盖；进程中途崩溃最多丢本轮，不会留下半截账本。
+
+账本损坏时 `readProgress` 返回 `undefined`；但 `--resume` 下"文件存在却读不出"按失败处理（`exit 3`），避免把损坏账本当成全新任务而重复删除。
+
+## 分页完整性
+
+会话列表是删除目标与归属判定的唯一来源，宁可报错也不返回半份列表：
+
+- 新接口用 `next_cursor` 翻页，旧接口用 `updated_at` 时间游标；
+- 达到 `maxPages`（200）仍 `has_more=true` → 抛"会话列表未完整遍历"，不进入删除阶段；
+- `has_more=true` 但这一页拿不到任何可用游标 → 直接抛错；
+- 游标与上一次相同 → 抛"游标未推进"，防止服务端重复返回同一页时空转到触顶；
+- 旧接口的时间游标不再附加 `pinned=false`：该过滤会漏掉置顶会话，而"置顶会话是否存在"直接影响归属校验与置顶保护。置顶由 `guardLink` 单独拦截，分页只负责把列表取全。
+
+## 请求超时
+
+`createFetchTransport` 支持 `timeoutMs`（CLI 用 `--timeout` 配置，默认 30s）：每次请求挂 `AbortController`，超时即 abort 并在 `finally` 清理定时器。执行器把超时记为 `TIMEOUT: ...`，与普通网络错误区分，避免"连接挂死"被当成可无限重试。
 
 ## MV3 打包
 

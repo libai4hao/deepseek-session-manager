@@ -50,6 +50,19 @@ describe('readStorageState', () => {
     expect(readStorageState(file).token).toBe('raw-token');
   });
 
+  it('does not trust lookalike domains or fallback tokens from unrelated origins', () => {
+    const file = writeState({
+      cookies: [{ name: 'bad', value: 'x', domain: '.deepseek.com.evil.example' }],
+      origins: [
+        { origin: 'https://deepseek.com.evil.example', localStorage: [{ name: 'userToken', value: '"evil"' }] },
+        { origin: 'https://example.com', localStorage: [{ name: 'userToken', value: '"other"' }] },
+      ],
+    });
+    const state = readStorageState(file);
+    expect(state.token).toBeUndefined();
+    expect(state.cookieHeader).toBeUndefined();
+  });
+
   it('returns no token when the state has none', () => {
     const file = writeState({ cookies: [], origins: [] });
     expect(readStorageState(file).token).toBeUndefined();

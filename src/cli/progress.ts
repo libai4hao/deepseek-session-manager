@@ -1,5 +1,5 @@
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { basename, join } from 'node:path';
 
 import type { ExecResult } from '../core/types';
 
@@ -31,7 +31,16 @@ export function readProgress(path: string): Progress | undefined {
   try {
     const parsed = JSON.parse(readFileSync(path, 'utf8')) as Progress;
     if (parsed.schema !== 'dsx.progress.v1') return undefined;
-    if (!parsed.entries || typeof parsed.entries !== 'object') return undefined;
+    if (typeof parsed.updatedAt !== 'string') return undefined;
+    if (parsed.accountHash !== undefined && typeof parsed.accountHash !== 'string') return undefined;
+    if (!parsed.entries || typeof parsed.entries !== 'object' || Array.isArray(parsed.entries)) return undefined;
+    const validStatuses = new Set<ProgressStatus>(['snapshotted', 'deleted', 'skipped', 'failed', 'aborted']);
+    for (const [id, entry] of Object.entries(parsed.entries)) {
+      if (!id || !entry || typeof entry !== 'object' || !validStatuses.has(entry.status) || typeof entry.at !== 'string') {
+        return undefined;
+      }
+      if (entry.snapshot !== undefined && typeof entry.snapshot !== 'string') return undefined;
+    }
     return parsed;
   } catch {
     return undefined;
@@ -52,12 +61,45 @@ export function reusableSnapshots(
   progress: Progress | undefined,
   snapshotDir: string,
   exists: (path: string) => boolean = existsSync,
+  read: (path: string) => string = path => readFileSync(path, 'utf8'),
 ): Map<string, string> {
   const reusable = new Map<string, string>();
+
   for (const [id, entry] of Object.entries(progress?.entries ?? {})) {
-    if (entry.snapshot && exists(join(snapshotDir, entry.snapshot))) reusable.set(id, entry.snapshot);
+    const name = entry.snapshot;
+    // A progress file is user-editable: never let it point outside snapshots/.
+    if (!name || basename(name) !== name || !exists(join(snapshotDir, name))) continue;
+
+    const fullPath = join(snapshotDir, name);
+    try {
+      if (name.endsWith('.enc.json')) {
+        // Ciphertext cannot be verified without the password; require a non-empty body.
+        if (read(fullPath).length === 0) continue;
+      } else {
+        const parsed = JSON.parse(read(fullPath)) as { schema?: string; id?: string };
+        if (parsed.schema !== 'dsx.snapshot.v1' || parsed.id !== id) continue;
+      }
+    } catch {
+      continue;
+    }
+
+    reusable.set(id, name);
   }
+
   return reusable;
+}
+
+export type ResumeAccountVerdict = 'ok' | 'no-current-hash' | 'no-stored-hash' | 'mismatch';
+
+/** Resume must never mix two accounts, even when they share an output directory. */
+export function checkResumeAccount(
+  progress: Progress | undefined,
+  accountHash: string | undefined,
+): ResumeAccountVerdict {
+  if (!progress) return 'ok';
+  if (!accountHash) return 'no-current-hash';
+  if (!progress.accountHash) return 'no-stored-hash';
+  return progress.accountHash === accountHash ? 'ok' : 'mismatch';
 }
 
 function emptyProgress(accountHash?: string): Progress {
@@ -107,5 +149,16 @@ export function mergeResults(
 }
 
 export function writeProgress(path: string, progress: Progress): void {
-  writeFileSync(path, JSON.stringify(progress, null, 2), 'utf8');
+  const tempPath = `${path}.tmp-${process.pid}`;
+  try {
+    writeFileSync(tempPath, `${JSON.stringify(progress, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });
+    renameSync(tempPath, path);
+  } catch (error) {
+    try {
+      if (existsSync(tempPath)) {
+        unlinkSync(tempPath);
+      }
+    } catch { /* preserve original write error */ }
+    throw error;
+  }
 }

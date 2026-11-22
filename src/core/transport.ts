@@ -6,23 +6,35 @@ export interface FetchTransportOptions {
   baseUrl?: string;
   headers: Record<string, string>;
   credentials?: RequestCredentials;
+  timeoutMs?: number;
 }
 
 export function createFetchTransport(options: FetchTransportOptions): Transport {
   const base = options.baseUrl ?? '';
   const credentials = options.credentials ?? 'include';
+  const timeoutMs = options.timeoutMs ?? 30_000;
 
   async function request(path: string, init: RequestInit): Promise<ApiResult<unknown>> {
-    const response = await fetch(`${base}${path}`, { credentials, ...init });
-
-    let payload: unknown = null;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error(`请求超时（${timeoutMs}ms）：${path}`)), timeoutMs);
     try {
-      payload = await response.json();
-    } catch {
-      payload = null;
-    }
+      const response = await fetch(`${base}${path}`, {
+        credentials,
+        ...init,
+        signal: controller.signal,
+      });
 
-    return normalizeApiResult(response.status, payload);
+      let payload: unknown = null;
+      try {
+        payload = await response.json();
+      } catch {
+        payload = null;
+      }
+
+      return normalizeApiResult(response.status, payload);
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   return {

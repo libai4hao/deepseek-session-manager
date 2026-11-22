@@ -9,6 +9,7 @@ export interface CliArgs {
   batchSize: number;
   batchPauseMs: number;
   retries: number;
+  timeoutMs: number;
   protectPinned: boolean;
   maskTitle: boolean;
   snapshot: boolean;
@@ -26,6 +27,7 @@ const DEFAULTS: Omit<CliArgs, 'urls'> = {
   batchSize: 20,
   batchPauseMs: 10_000,
   retries: 2,
+  timeoutMs: 30_000,
   protectPinned: true,
   maskTitle: false,
   snapshot: true,
@@ -65,6 +67,7 @@ export const USAGE = `DSX - DeepSeek 会话管家 (CLI)
   --batch-size <n>      每批条数，默认 20
   --batch-pause <ms>    批间暂停，默认 10000
   --retries <n>         失败重试次数，默认 2
+  --timeout <ms>        单次请求超时，默认 30000（1000–600000）
 
 输出:
   --out <dir>           报告/快照/审计输出目录，默认 ./dsx-out
@@ -81,7 +84,12 @@ function takeValue(argv: string[], index: number, flag: string): string {
 
 function toNumber(raw: string, flag: string): number {
   const parsed = Number(raw);
-  if (!Number.isFinite(parsed) || parsed < 0) throw new Error(`参数 ${flag} 需要非负数字`);
+  if (!Number.isSafeInteger(parsed) || parsed < 0) throw new Error(`参数 ${flag} 需要非负安全整数`);
+  if (flag === '--batch-size' && (parsed < 1 || parsed > 1000)) throw new Error(`参数 ${flag} 必须在 1 到 1000 之间`);
+  if (flag === '--interval' && parsed > 3_600_000) throw new Error(`参数 ${flag} 不能超过 3600000`);
+  if (flag === '--batch-pause' && parsed > 86_400_000) throw new Error(`参数 ${flag} 不能超过 86400000`);
+  if (flag === '--retries' && parsed > 20) throw new Error(`参数 ${flag} 不能超过 20`);
+  if (flag === '--timeout' && (parsed < 1000 || parsed > 600_000)) throw new Error(`参数 ${flag} 必须在 1000 到 600000 之间`);
   return parsed;
 }
 
@@ -129,6 +137,11 @@ export function parseArgs(argv: string[]): CliArgs {
       }
       case '--retries': {
         args.retries = toNumber(takeValue(argv, index + 1, flag), flag);
+        index += 1;
+        break;
+      }
+      case '--timeout': {
+        args.timeoutMs = toNumber(takeValue(argv, index + 1, flag), flag);
         index += 1;
         break;
       }

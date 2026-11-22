@@ -93,6 +93,16 @@ describe('runQueue', () => {
     expect(results[0].attempts).toBe(2);
   });
 
+  it('does not sleep after the final failed network attempt', async () => {
+    let sleeps = 0;
+    const transport: Transport = {
+      async get<T>(): Promise<ApiResult<T>> { return { http: 200, code: 0 } as ApiResult<T>; },
+      async post<T>(): Promise<ApiResult<T>> { throw new Error('ECONNRESET'); },
+    };
+    await runQueue(transport, [IDS[0]], fastOptions({ retries: 0, sleep: async () => { sleeps += 1; } }));
+    expect(sleeps).toBe(0);
+  });
+
   it('treats exhausted network retries as a failure, not a crash', async () => {
     const transport: Transport = {
       async get<T>(): Promise<ApiResult<T>> {
@@ -107,5 +117,19 @@ describe('runQueue', () => {
 
     expect(results[0].status).toBe('failed');
     expect(results[0].reason).toContain('ECONNRESET');
+  });
+
+  it('labels request timeouts separately from other network failures', async () => {
+    const transport: Transport = {
+      async get<T>(): Promise<ApiResult<T>> { return { http: 200, code: 0 } as ApiResult<T>; },
+      async post<T>(): Promise<ApiResult<T>> {
+        throw new Error('请求超时（30000ms）：/api/v0/chat_session/delete');
+      },
+    };
+
+    const results = await runQueue(transport, [IDS[0]], fastOptions({ retries: 0 }));
+
+    expect(results[0].status).toBe('failed');
+    expect(results[0].reason).toMatch(/^TIMEOUT:/);
   });
 });

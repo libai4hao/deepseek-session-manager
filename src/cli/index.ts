@@ -12,7 +12,7 @@ import { encryptSnapshot, encryptedFileName } from './snapshot-crypto';
 import { execResultToAudit, hashId, toAuditLine, type AuditEvent } from '../core/audit';
 import type { ExecResult, SessionMeta } from '../core/types';
 import { parseArgs, USAGE, type CliArgs } from './args';
-import { completedIds, markSnapshots, mergeResults, progressPath, readProgress, reusableSnapshots, writeProgress } from './progress';
+import { checkResumeAccount, completedIds, markSnapshots, mergeResults, progressPath, readProgress, reusableSnapshots, writeProgress } from './progress';
 import { readStorageState, type AccountState } from './state';
 import { renderMarkdown, type PlanItem, type Report, type ReportMode } from './report';
 
@@ -114,6 +114,7 @@ async function main(): Promise<number> {
       ...(state.cookieHeader ? { cookie: state.cookieHeader } : {}),
     },
     credentials: 'omit',
+    timeoutMs: args.timeoutMs,
   });
 
   const accountId = await getAccountId(transport).catch(() => undefined);
@@ -143,7 +144,27 @@ async function main(): Promise<number> {
   const writing = mode !== 'preflight';
   const outDir = args.out;
 
-  const storedProgress = args.resume && writing ? readProgress(progressPath(outDir)) : undefined;
+  const progressFile = progressPath(outDir);
+  const storedProgress = args.resume && writing ? readProgress(progressFile) : undefined;
+  if (args.resume && writing) {
+    if (existsSync(progressFile) && !storedProgress) {
+      console.error('断点文件存在但格式损坏或不受支持；为避免误删，已拒绝续跑。请先备份并人工处理 progress.json。');
+      return 3;
+    }
+    if (storedProgress) {
+      const verdict = checkResumeAccount(storedProgress, accountHash);
+      if (verdict !== 'ok') {
+        const reason =
+          verdict === 'no-current-hash'
+            ? '当前账号指纹获取失败'
+            : verdict === 'no-stored-hash'
+              ? '历史进度没有账号指纹'
+              : '当前账号与历史进度不一致';
+        console.error(`断点续跑账号校验失败（${reason}）：为避免跨账号误删，已中止。`);
+        return 3;
+      }
+    }
+  }
   const doneIds = completedIds(storedProgress);
 
   const plan: PlanItem[] = links.map(link => {
@@ -336,7 +357,7 @@ async function main(): Promise<number> {
     if (results.length > 0) progress = mergeResults(progress, results, snapshotFiles);
     if (progress) {
       if (accountHash && !progress.accountHash) progress.accountHash = accountHash;
-      writeProgress(progressPath(outDir), progress);
+      writeProgress(progressFile, progress);
     }
   }
 

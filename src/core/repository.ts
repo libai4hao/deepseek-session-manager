@@ -41,13 +41,16 @@ export async function listSessions(
   let cursor: number | null = null;
   let mode: 'seq' | 'time' | null = null;
 
+  if (!Number.isSafeInteger(pageSize) || pageSize < 1) throw new Error('pageSize 必须为正整数');
+  if (!Number.isSafeInteger(maxPages) || maxPages < 1) throw new Error('maxPages 必须为正整数');
+  let completed = false;
   for (let page = 0; page < maxPages; page += 1) {
     let path = `/api/v0/chat_session/fetch_page?count=${pageSize}`;
     if (cursor !== null && mode !== null) {
       path +=
         mode === 'seq'
           ? `&before_seq_id=${cursor}`
-          : `&lte_cursor.pinned=false&lte_cursor.updated_at=${cursor}`;
+          : `&lte_cursor.updated_at=${cursor}`;
     }
 
     const result = await transport.get<Record<string, unknown>>(path);
@@ -69,32 +72,45 @@ export async function listSessions(
       }
     }
 
-    if (biz['has_more'] !== true || batch.length === 0) break;
+    if (biz['has_more'] !== true || batch.length === 0) { completed = true; break; }
+
+    let candidate: number | undefined;
 
     const nextCursor = biz['next_cursor'];
     if (nextCursor !== undefined && nextCursor !== null) {
       mode = 'seq';
-      cursor = num(nextCursor);
-      continue;
+      candidate = num(nextCursor);
+    } else {
+      const seqIds = batch
+        .map(item => num(item['seq_id'], Number.NaN))
+        .filter(value => Number.isFinite(value));
+
+      if (seqIds.length > 0) {
+        mode = 'seq';
+        candidate = Math.min(...seqIds);
+      } else {
+        const times = batch
+          .map(item => num(item['updated_at'], Number.NaN))
+          .filter(value => Number.isFinite(value));
+
+        if (times.length === 0) {
+          throw new Error('分页响应声明 has_more=true，但缺少可用游标；拒绝返回不完整会话列表');
+        }
+        mode = 'time';
+        candidate = Math.min(...times);
+      }
     }
 
-    const seqIds = batch
-      .map(item => num(item['seq_id'], Number.NaN))
-      .filter(value => Number.isFinite(value));
-    if (seqIds.length > 0) {
-      mode = 'seq';
-      cursor = Math.min(...seqIds);
-      continue;
+    if (candidate === cursor) {
+      throw new Error(`分页游标未推进（${mode}: ${candidate}）；拒绝在重复页面上空转并返回不完整列表`);
     }
 
-    const times = batch
-      .map(item => num(item['updated_at'], Number.NaN))
-      .filter(value => Number.isFinite(value));
-    if (times.length === 0) break;
-    mode = 'time';
-    cursor = Math.min(...times);
+    cursor = candidate;
   }
 
+  if (!completed) {
+    throw new Error(`会话分页达到最大页数 ${maxPages}，仍无法确认列表完整；已拒绝返回部分结果`);
+  }
   return sessionsOut;
 }
 
