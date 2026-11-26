@@ -1,8 +1,8 @@
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
-import { validateSnapshot } from '../core/snapshot';
-import type { ExecResult } from '../core/types';
+import { snapshotMatchesMeta, validateSnapshot } from '../core/snapshot';
+import type { ExecResult, SessionMeta } from '../core/types';
 import { validateEncryptedSnapshot } from './snapshot-crypto';
 
 export type ProgressStatus = 'snapshotted' | 'deleted' | 'skipped' | 'failed' | 'aborted';
@@ -13,6 +13,7 @@ export interface ProgressEntry {
   attempts?: number;
   ms?: number;
   snapshot?: string;
+  verifiedAt?: string;
 }
 
 export interface Progress {
@@ -42,6 +43,7 @@ export function readProgress(path: string): Progress | undefined {
         return undefined;
       }
       if (entry.snapshot !== undefined && typeof entry.snapshot !== 'string') return undefined;
+      if (entry.verifiedAt !== undefined && typeof entry.verifiedAt !== 'string') return undefined;
     }
     return parsed;
   } catch {
@@ -53,7 +55,7 @@ export function readProgress(path: string): Progress | undefined {
 export function completedIds(progress?: Progress): Set<string> {
   const done = new Set<string>();
   for (const [id, entry] of Object.entries(progress?.entries ?? {})) {
-    if (entry.status === 'deleted') done.add(id);
+    if (entry.status === 'deleted' && entry.verifiedAt) done.add(id);
   }
   return done;
 }
@@ -64,6 +66,7 @@ export function reusableSnapshots(
   snapshotDir: string,
   exists: (path: string) => boolean = existsSync,
   read: (path: string) => string = path => readFileSync(path, 'utf8'),
+  metaById?: Map<string, SessionMeta>,
 ): Map<string, string> {
   const reusable = new Map<string, string>();
 
@@ -79,6 +82,8 @@ export function reusableSnapshots(
       } else {
         const snapshot = validateSnapshot(JSON.parse(read(fullPath)));
         if (snapshot.id !== id) continue;
+        const meta = metaById?.get(id);
+        if (meta && !snapshotMatchesMeta(snapshot, meta)) continue;
       }
     } catch {
       continue;
@@ -135,7 +140,7 @@ export function mergeResults(
   for (const result of results) {
     const status: ProgressStatus =
       result.status === 'noop'
-        ? 'deleted'
+        ? 'failed'
         : result.status === 'skipped' && result.reason === 'ABORTED'
           ? 'aborted'
           : (result.status as ProgressStatus);
@@ -146,6 +151,7 @@ export function mergeResults(
       attempts: result.attempts,
       ms: result.ms,
       snapshot: idToSnapshot.get(result.id) ?? base.entries[result.id]?.snapshot,
+      verifiedAt: status === 'deleted' ? at : undefined,
     };
   }
 
@@ -153,18 +159,7 @@ export function mergeResults(
   return base;
 }
 
-export function reconcileDeletedResults(
-  results: ExecResult[],
-  verify: Array<{ id: string; stillThere: boolean }> | undefined,
-): ExecResult[] {
-  return results.map(result => {
-    if (result.status !== 'deleted') return result;
-    const entry = verify?.find(item => item.id === result.id);
-    if (!entry) return { ...result, status: 'failed', reason: 'VERIFY_FAILED' };
-    if (entry.stillThere) return { ...result, status: 'failed', reason: 'VERIFY_STILL_THERE' };
-    return result;
-  });
-}
+export { reconcileDeletedResults } from '../core/executor';
 
 export function writeProgress(path: string, progress: Progress): void {
   const tempPath = `${path}.tmp-${process.pid}`;

@@ -44,10 +44,35 @@ describe('snapshot encryption', () => {
       updatedAt: snapshot.updatedAt,
     });
     expect(name).not.toContain('内部讨论');
-    expect(name).toContain('abcdefgh-1111-2222-3333-444444444444');
+    expect(name).toContain('61626364656667682d313131312d323232322d333333332d3434343434343434343434');
   });
 
   it('rejects arbitrary nonempty ciphertext as an envelope', () => {
     expect(() => validateEncryptedSnapshot('ciphertext')).toThrow(/结构无效/);
+  });
+
+  it('rejects truncated tags, noncanonical base64, wrong lengths, and mismatched KDF metadata', () => {
+    const envelope = encryptSnapshot(snapshot, 'pw', Buffer.alloc(16, 1));
+
+    expect(() => validateEncryptedSnapshot({
+      ...envelope,
+      cipher: { ...envelope.cipher, tag: envelope.cipher.tag.slice(0, -4) },
+    })).toThrow(/tag/);
+    expect(() => validateEncryptedSnapshot({
+      ...envelope,
+      cipher: { ...envelope.cipher, iv: `${envelope.cipher.iv}\n` },
+    })).toThrow(/iv/);
+    expect(() => validateEncryptedSnapshot({
+      ...envelope,
+      kdf: { ...envelope.kdf, salt: Buffer.alloc(8).toString('base64') },
+    })).toThrow(/salt/);
+    expect(() => validateEncryptedSnapshot({
+      ...envelope,
+      kdf: { ...envelope.kdf, N: envelope.kdf.N / 2 },
+    })).toThrow(/结构无效/);
+  });
+
+  it('rejects an invalid encryption salt length', () => {
+    expect(() => encryptSnapshot(snapshot, 'pw', Buffer.alloc(8))).toThrow(/16 字节/);
   });
 });

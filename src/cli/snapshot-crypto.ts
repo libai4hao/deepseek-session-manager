@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
 
-import { validateSnapshot, type Snapshot } from '../core/snapshot';
+import { snapshotIdForFileName, validateSnapshot, type Snapshot } from '../core/snapshot';
 import type { SessionMeta } from '../core/types';
 
 export interface EncryptedSnapshot {
@@ -18,12 +18,30 @@ function deriveKey(password: string, salt: Buffer): Buffer {
   return scryptSync(password, salt, KEY_LENGTH, { N: SCRYPT.N, r: SCRYPT.r, p: SCRYPT.p });
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function decodeBase64(value: unknown, expectedBytes: number | undefined, field: string): Buffer {
+  if (typeof value !== 'string' || !value) throw new Error(`加密快照 ${field} 无效`);
+  const decoded = Buffer.from(value, 'base64');
+  if (
+    decoded.toString('base64') !== value ||
+    decoded.length === 0 ||
+    (expectedBytes !== undefined && decoded.length !== expectedBytes)
+  ) {
+    throw new Error(`加密快照 ${field} 无效`);
+  }
+  return decoded;
+}
+
 export function encryptSnapshot(
   snapshot: Snapshot,
   password: string,
   salt: Buffer = randomBytes(16),
 ): EncryptedSnapshot {
   if (!password) throw new Error('快照加密需要口令');
+  if (salt.length !== 16) throw new Error('快照加密 salt 必须为 16 字节');
 
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', deriveKey(password, salt), iv);
@@ -40,47 +58,47 @@ export function encryptSnapshot(
 }
 
 export function validateEncryptedSnapshot(value: unknown): EncryptedSnapshot {
-  const envelope = value as Partial<EncryptedSnapshot> | null;
+  const envelope = isRecord(value) ? value : null;
+  const kdf = isRecord(envelope?.['kdf']) ? envelope['kdf'] : null;
+  const cipher = isRecord(envelope?.['cipher']) ? envelope['cipher'] : null;
   if (
     !envelope ||
-    envelope.schema !== 'dsx.snapshot.enc.v1' ||
-    !envelope.kdf ||
-    envelope.kdf.name !== 'scrypt' ||
-    typeof envelope.kdf.salt !== 'string' ||
-    !envelope.kdf.salt ||
-    !Number.isSafeInteger(envelope.kdf.N) ||
-    !Number.isSafeInteger(envelope.kdf.r) ||
-    !Number.isSafeInteger(envelope.kdf.p) ||
-    !envelope.cipher ||
-    envelope.cipher.name !== 'aes-256-gcm' ||
-    typeof envelope.cipher.iv !== 'string' ||
-    !envelope.cipher.iv ||
-    typeof envelope.cipher.tag !== 'string' ||
-    !envelope.cipher.tag ||
-    typeof envelope.data !== 'string' ||
-    !envelope.data
+    envelope['schema'] !== 'dsx.snapshot.enc.v1' ||
+    !kdf ||
+    kdf['name'] !== 'scrypt' ||
+    kdf['N'] !== SCRYPT.N ||
+    kdf['r'] !== SCRYPT.r ||
+    kdf['p'] !== SCRYPT.p ||
+    !cipher ||
+    cipher['name'] !== 'aes-256-gcm'
   ) {
     throw new Error('加密快照结构无效');
   }
-  return envelope as EncryptedSnapshot;
+
+  decodeBase64(kdf['salt'], 16, 'salt');
+  decodeBase64(cipher['iv'], 12, 'iv');
+  decodeBase64(cipher['tag'], 16, 'tag');
+  decodeBase64(envelope['data'], undefined, 'data');
+  return envelope as unknown as EncryptedSnapshot;
 }
 
 export function decryptSnapshot(envelope: EncryptedSnapshot, password: string): Snapshot {
   const validEnvelope = validateEncryptedSnapshot(envelope);
-  const salt = Buffer.from(validEnvelope.kdf.salt, 'base64');
-  const iv = Buffer.from(validEnvelope.cipher.iv, 'base64');
-  const tag = Buffer.from(validEnvelope.cipher.tag, 'base64');
+  const salt = decodeBase64(validEnvelope.kdf.salt, 16, 'salt');
+  const iv = decodeBase64(validEnvelope.cipher.iv, 12, 'iv');
+  const tag = decodeBase64(validEnvelope.cipher.tag, 16, 'tag');
+  const data = decodeBase64(validEnvelope.data, undefined, 'data');
 
   const decipher = createDecipheriv('aes-256-gcm', deriveKey(password, salt), iv);
   decipher.setAuthTag(tag);
-  const plaintext = Buffer.concat([decipher.update(Buffer.from(validEnvelope.data, 'base64')), decipher.final()]);
+  const plaintext = Buffer.concat([decipher.update(data), decipher.final()]);
 
   return validateSnapshot(JSON.parse(plaintext.toString('utf8')));
 }
 
 /** `<yyyyMMdd>_<id>.enc.json` keeps encrypted backups free of title metadata. */
 export function encryptedSnapshotFileName(meta: SessionMeta): string {
-  const safeId = meta.id.replace(/[\\/:*?"<>|\s]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'unknown';
+  const safeId = snapshotIdForFileName(meta.id);
   const date = new Date(meta.updatedAt * 1000).toISOString().slice(0, 10).replace(/-/g, '');
   return `${date}_${safeId}.enc.json`;
 }

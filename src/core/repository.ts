@@ -8,11 +8,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function num(value: unknown, fallback = 0): number {
-  const parsed = typeof value === 'number' ? value : Number(value);
-  return Number.isFinite(parsed) ? parsed : fallback;
-}
-
 function optionalNum(value: unknown): number | undefined {
   if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) return undefined;
   if (typeof value !== 'number' && typeof value !== 'string') return undefined;
@@ -21,31 +16,51 @@ function optionalNum(value: unknown): number | undefined {
 }
 
 function cursorNum(value: unknown, field: string): number | undefined {
+  if (value === undefined || value === null) return undefined;
   const parsed = optionalNum(value);
-  if (parsed === undefined && value !== undefined && value !== null && !(typeof value === 'string' && value.trim() === '')) {
+  if (parsed === undefined) {
     throw new Error(`分页字段 ${field} 无效；拒绝返回不完整会话列表`);
   }
   return parsed;
 }
 
-function toMeta(raw: Record<string, unknown>): SessionMeta | undefined {
+function requiredNum(value: unknown, field: string): number {
+  if (typeof value !== 'number' || !Number.isFinite(value)) {
+    throw new Error(`接口字段 ${field} 无效；拒绝使用不完整数据`);
+  }
+  return value;
+}
+
+function requiredString(value: unknown, field: string, allowEmpty = false): string {
+  if (typeof value !== 'string' || (!allowEmpty && !value)) {
+    throw new Error(`会话消息字段 ${field} 无效；拒绝生成不完整快照`);
+  }
+  return value;
+}
+
+function toMeta(raw: Record<string, unknown>): SessionMeta {
   const id = raw['id'];
-  if (typeof id !== 'string' || !id) return undefined;
+  if (typeof id !== 'string' || !id.trim()) {
+    throw new Error('会话列表项缺少有效 id；拒绝返回不完整列表');
+  }
+  if (typeof raw['pinned'] !== 'boolean') {
+    throw new Error('会话列表项 pinned 必须为布尔值；拒绝绕过置顶保护');
+  }
 
   const title = raw['title'];
   return {
     id,
     title: typeof title === 'string' && title ? title : '(无标题)',
     pinned: raw['pinned'] === true,
-    updatedAt: num(raw['updated_at']),
-    seqId: optionalNum(raw['seq_id']),
+    updatedAt: requiredNum(raw['updated_at'], 'updated_at'),
+    seqId: cursorNum(raw['seq_id'], 'seq_id'),
   };
 }
 
 /**
  * `fetch_page` has two cursor dialects in the wild:
  *   new: ?count=N&before_seq_id=<seq>, response carries next_cursor / has_more
- *   old: ?lte_cursor.pinned=false&lte_cursor.updated_at=<ts>
+ *   old: ?lte_cursor.updated_at=<ts>
  * We start with `count` only, then pick a dialect from the first response.
  */
 export async function listSessions(
@@ -89,7 +104,7 @@ export async function listSessions(
 
     for (const item of batch) {
       const meta = toMeta(item);
-      if (meta && !seen.has(meta.id)) {
+      if (!seen.has(meta.id)) {
         seen.add(meta.id);
         sessionsOut.push(meta);
       }
@@ -147,18 +162,20 @@ export async function listSessions(
 }
 
 function toMessage(raw: Record<string, unknown>): ChatMessage {
-  const fragments = Array.isArray(raw['fragments'])
-    ? (raw['fragments'] as Array<Record<string, unknown>>)
-    : [];
+  if (!Array.isArray(raw['fragments']) || raw['fragments'].some(fragment => !isRecord(fragment))) {
+    throw new Error('会话消息 fragments 结构无效；拒绝生成不完整快照');
+  }
+
+  const fragments = (raw['fragments'] as Array<Record<string, unknown>>).map(fragment => ({
+    type: requiredString(fragment['type'], 'fragments.type'),
+    content: requiredString(fragment['content'], 'fragments.content', true),
+  }));
 
   return {
-    messageId: num(raw['message_id']),
-    role: typeof raw['role'] === 'string' ? (raw['role'] as string) : 'UNKNOWN',
-    insertedAt: num(raw['inserted_at']),
-    fragments: fragments.map(fragment => ({
-      type: String(fragment['type'] ?? ''),
-      content: String(fragment['content'] ?? ''),
-    })),
+    messageId: requiredNum(raw['message_id'], 'message_id'),
+    role: requiredString(raw['role'], 'role'),
+    insertedAt: requiredNum(raw['inserted_at'], 'inserted_at'),
+    fragments,
   };
 }
 
@@ -178,12 +195,6 @@ export async function getMessages(transport: Transport, sessionId: string): Prom
   }
 
   const messages = biz['chat_messages'] as Array<Record<string, unknown>>;
-  for (const message of messages) {
-    if (!Array.isArray(message['fragments']) || message['fragments'].some(fragment => !isRecord(fragment))) {
-      throw new Error('会话消息 fragments 结构无效；拒绝生成不完整快照');
-    }
-  }
-
   return messages.map(toMessage);
 }
 

@@ -59,11 +59,14 @@
  ▼
 快照 buildSnapshot → snapshots/*.json
  │  └─ 失败 ──→ 中止整批（除非显式 --no-snapshot）
+ │  └─ 油猴 ──→ 用户确认文件已保存，否则取消
  ▼
 预演 / 用户确认
  │  ├─ dry-run ──→ 输出清单后结束（不拉消息、不写快照）
  │  ├─ export-only ──→ 拉全文写快照后结束（永不调删除接口）
  │  └─ apply：>5 条需 --yes，>50 条直接拒绝
+ ▼
+每次实际 POST（含重试/形态切换）前：列表校验 + 快照版本匹配（目标变化即中止）
  ▼
 执行 runQueue（串行）
  ├─ deleted       成功
@@ -72,6 +75,7 @@
  └─ shape switch  422 → 单数体换数组体重试
  ▼
 复核 verifyDeleted（重新拉列表，看是否还在）
+ │  └─ deleted/noop 未通过复核 ──→ failed(VERIFY_*)
  ▼
 审计 audit.jsonl（追加写）+ report.json/md + progress.json（断点续跑账本）
 ```
@@ -84,7 +88,7 @@
 
 **3. 删除参数形态靠 422 探，不靠猜。** 接口返回 `{detail:[{loc:"body.xxx"}]}` 时会指出字段名。先在 `auto` 模式用单数体试一次，`schema` 类错误即切数组体，并在本次运行内缓存（`onShapeDetected`）。形态探测不消耗失败重试预算，因此 `--retries 0` 也至少会发送一次数组体请求。
 
-**4. 快照失败即中止。** 快照是唯一的事后证据。为了让"省一点磁盘"而放行一个无留档的删除，不划算；需要时可以 `--no-snapshot` 显式承担。
+**4. 快照失败即中止。** 快照是唯一的事后证据。为了让"省一点磁盘"而放行一个无留档的删除，不划算；需要时可以 `--no-snapshot` 显式承担。快照生成或用户确认保存后，CLI 与油猴会在每次实际 POST（包括重试与删除体形态切换）前再拉一次列表并核对归属、置顶状态和 `updatedAt`；版本变化就中止后续删除。油猴无法直接观察浏览器下载结果，因此要求用户明确输入 `SAVED` 确认文件已保存。
 
 **5. 侧栏不拆 DOM。** 删除后前端状态仍持有节点，手工 `remove()` 会导致列表错乱；油猴端删完只重拉列表，不碰 React 的节点。
 
@@ -104,14 +108,14 @@
 
 `progress.json`（`dsx.progress.v1`）按 session id 记账：
 
-- `deleted` → 视为完成，下次 `--resume` 直接跳过；即使会话已从服务端列表消失，也先识别完成态再判 `NOT_FOUND`；
+- `deleted` + `verifiedAt` → 视为完成，下次 `--resume` 直接跳过；旧版只有 `deleted`、没有复核证据的条目不再信任，会重新走校验；
 - `failed` / `aborted` → 仍会重试；鉴权中止的 `skipped(ABORTED)` 持久化为 `aborted`，不会误判完成；
 - `snapshotted` + `snapshot` 文件名 → 下次运行复用已有快照，不再拉一次全文。
 
 三个防误删约束：
 
 1. **账号隔离。** 账本写入当前账号指纹（`accountHash`）。`--resume` 时当前指纹与账本不一致、任一方缺失，都直接 `exit 3`，不给"换账号接着删"留口子。
-2. **快照复用要过完整性。** 文件名必须留在 `snapshots/` 内（拒绝 `../`），明文快照必须通过完整结构校验且 `id` 匹配；加密快照必须通过 envelope 校验、用当前口令成功解密且 `id` 匹配。加密模式不匹配或任一项失败都重新抓取，不拿旧文件当证据。
+2. **快照复用要过完整性与新鲜度。** 文件名必须留在 `snapshots/` 内（拒绝 `../`），明文快照必须通过完整结构校验；加密快照必须通过固定 scrypt 参数、规范 Base64、salt/IV/完整 16 字节 GCM tag 校验并成功解密。两种快照的 `id` 与 `updatedAt` 都必须匹配当前会话，否则重新抓取，不拿旧文件当证据。
 3. **原子落盘。** 先写 `progress.json.tmp-<pid>`（`wx` 独占），再 `rename` 覆盖；进程中途崩溃最多丢本轮，不会留下半截账本。
 
 账本损坏时 `readProgress` 返回 `undefined`；但 `--resume` 下"文件存在却读不出"按失败处理（`exit 3`），避免把损坏账本当成全新任务而重复删除。
@@ -132,7 +136,7 @@
 
 `createFetchTransport` 支持 `timeoutMs`（CLI 用 `--timeout` 配置，默认 30s）：每次请求挂 `AbortController`，超时即 abort 并在 `finally` 清理定时器。执行器把超时记为 `TIMEOUT: ...`，与普通网络错误区分，避免"连接挂死"被当成可无限重试。
 
-响应解析同样失败关闭：非 JSON、空正文或缺少数值 `code` 都不会被补成 `code: 0`；非 JSON 响应仍保留 HTTP 状态，因此 401 会中止队列、403 仍走冷却重试。消息接口要求 `chat_messages` 明确为数组，且每条消息的 `fragments` 都必须是数组，避免把网关页面或改版响应当成成功删除/空快照。
+响应解析同样失败关闭：非 JSON、空正文或缺少数值 `code` 都不会被补成 `code: 0`；非 JSON 响应仍保留 HTTP 状态，因此 401 会中止队列、403 仍走冷却重试。会话 id、布尔 `pinned`、数值 `updated_at`、已声明的 `seq_id` 以及消息的 `message_id`、`role`、`inserted_at` 和 fragment 字段都必须符合类型；不再把非法值静默补成 `0`、`UNKNOWN`、空字符串或 `pinned=false`。`chat_messages` 与 `fragments` 必须明确为数组，避免把网关页面或改版响应当成成功删除/空快照。
 
 ## MV3 打包
 

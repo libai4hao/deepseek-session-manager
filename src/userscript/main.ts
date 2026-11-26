@@ -4,8 +4,8 @@ import { createFetchTransport } from '../core/transport';
 import { dedupeLinks, parseLinks, splitLines } from '../core/parser';
 import { buildIndex, guardLink } from '../core/guard';
 import { getMessages, listSessions, verifyDeleted } from '../core/repository';
-import { runQueue } from '../core/executor';
-import { buildSnapshot } from '../core/snapshot';
+import { reconcileDeletedResults, runQueue } from '../core/executor';
+import { buildSnapshot, type Snapshot } from '../core/snapshot';
 import { locateSession, sessionIdFromHref } from './sidebar';
 import type { ExecResult, ParsedLink, SessionMeta, Transport } from '../core/types';
 import { execResultToAudit, toAuditLine, type AuditEvent } from '../core/audit';
@@ -390,7 +390,7 @@ function mountPanel(): void {
         try {
           setHint('生成快照…');
           const transport = makeTransport(token);
-          const snapshots = [];
+          const snapshots: Snapshot[] = [];
 
           for (const row of targets) {
             const meta = state.index.get(row.id!);
@@ -399,6 +399,10 @@ function mountPanel(): void {
             snapshots.push(buildSnapshot(meta, messages));
           }
           download(`dsx-snapshots-${stamp()}.json`, JSON.stringify(snapshots, null, 2));
+          if (prompt('已触发快照下载。请确认文件已成功保存后输入 SAVED；未保存或下载失败请输入其他内容取消：') !== 'SAVED') {
+            setHint('未确认快照保存成功，已取消删除');
+            return;
+          }
 
           const ids = targets.map(row => row.id as string);
 
@@ -408,6 +412,19 @@ function mountPanel(): void {
             ids,
             { intervalMs: 500, batchSize: 20, batchPauseMs: 10_000, retries: 2, shape: 'auto' },
             {
+              beforeDelete: async id => {
+                const finalSessions = await listSessions(transport);
+                const finalIndex = buildIndex(finalSessions);
+                const snapshot = snapshots.find(item => item.id === id)!;
+                const link = parseLinks([targets.find(row => row.id === id)!.link])[0];
+                const outcome = link ? guardLink(link, finalIndex, { protectPinned: true }) : undefined;
+                const current = outcome?.ok ? outcome.meta : undefined;
+                if (!current || current.updatedAt !== snapshot.updatedAt) {
+                  throw new Error(`${id.slice(0, 8)} 在快照保存后已更新或不再可删`);
+                }
+                state.sessions = finalSessions;
+                state.index = finalIndex;
+              },
               onStart: (id, position, total) => setHint(`[${position + 1}/${total}] ${id.slice(0, 8)} …`),
               onResult: result => {
                 const row = state.rows.find(item => item.id === result.id);
@@ -421,15 +438,38 @@ function mountPanel(): void {
           appendAudit(audit);
           auditFlushed = true;
 
+          const applyVerification = (verify: Array<{ id: string; stillThere: boolean }> | undefined): ExecResult[] => {
+            const reconciled = reconcileDeletedResults(results, verify);
+            const corrections: AuditEvent[] = [];
+            for (let index = 0; index < results.length; index += 1) {
+              if (results[index].status === reconciled[index].status) continue;
+              const row = state.rows.find(item => item.id === reconciled[index].id);
+              if (row) row.result = reconciled[index];
+              corrections.push(execResultToAudit(reconciled[index]));
+            }
+            appendAudit(corrections);
+            results.splice(0, results.length, ...reconciled);
+            renderRows();
+            return reconciled;
+          };
+
+          let verify: Array<{ id: string; stillThere: boolean }> | undefined;
           try {
-            const verify = await verifyDeleted(transport, ids);
-            const still = verify.filter(entry => entry.stillThere).length;
-            state.sessions = await listSessions(transport);
-            state.index = buildIndex(state.sessions);
-            setHint(`完成：删除 ${results.filter(r => r.status === 'deleted').length} 条，仍在列表 ${still} 条`);
+            verify = await verifyDeleted(transport, ids);
           } catch {
-            setHint(`完成：删除 ${results.filter(r => r.status === 'deleted').length} 条（复核失败）`);
+            setHint('删除后复核失败，未确认的结果不会记为完成');
           }
+          const reconciled = applyVerification(verify);
+          const still = verify?.filter(entry => entry.stillThere).length ?? 0;
+          if (verify) {
+            try {
+              state.sessions = await listSessions(transport);
+              state.index = buildIndex(state.sessions);
+            } catch {
+              setHint('会话列表刷新失败，不影响已完成的删除复核');
+            }
+          }
+          setHint(`完成：已验证删除 ${reconciled.filter(r => r.status === 'deleted').length} 条，仍在列表 ${still} 条${verify ? '' : '（复核失败）'}`);
         } catch (error) {
           if (!auditFlushed && audit.length > 0) appendAudit(audit);
           setHint(`执行异常中止：${(error as Error).message}`);

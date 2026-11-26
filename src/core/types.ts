@@ -83,6 +83,7 @@ export interface ExecOptions {
 }
 
 export interface ExecHooks {
+  beforeDelete?(id: string, index: number, total: number): void | Promise<void>;
   onStart?(id: string, index: number, total: number): void;
   onResult?(result: ExecResult): void;
   onShapeDetected?(shape: DeleteShape): void;

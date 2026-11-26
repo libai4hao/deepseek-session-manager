@@ -55,6 +55,14 @@ export function validateSnapshot(value: unknown): Snapshot {
   return snapshot as Snapshot;
 }
 
+export function snapshotIdForFileName(id: string): string {
+  return Array.from(new TextEncoder().encode(id), byte => byte.toString(16).padStart(2, '0')).join('');
+}
+
+export function snapshotMatchesMeta(snapshot: Snapshot, meta: SessionMeta): boolean {
+  return snapshot.id === meta.id && snapshot.updatedAt === meta.updatedAt;
+}
+
 export function buildSnapshot(
   meta: SessionMeta,
   messages: ChatMessage[],
@@ -90,7 +98,7 @@ export function snapshotFileName(meta: SessionMeta): string {
       .replace(/^_|_$/g, '')
       .slice(0, 40) || 'untitled';
 
-  const safeId = meta.id.replace(/[\\/:*?"<>|\s]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'unknown';
+  const safeId = snapshotIdForFileName(meta.id);
   const date = new Date(meta.updatedAt * 1000).toISOString().slice(0, 10).replace(/-/g, '');
   return `${date}_${slug}_${safeId}.json`;
 }

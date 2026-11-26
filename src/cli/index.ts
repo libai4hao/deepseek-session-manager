@@ -7,7 +7,7 @@ import { dedupeLinks, parseLinks, sanitizeLinkForReport, splitLines } from '../c
 import { buildIndex, guardLink } from '../core/guard';
 import { getAccountId, getMessages, listSessions, verifyDeleted } from '../core/repository';
 import { runQueue } from '../core/executor';
-import { buildSnapshot, snapshotFileName, validateSnapshot } from '../core/snapshot';
+import { buildSnapshot, snapshotFileName, snapshotMatchesMeta, validateSnapshot } from '../core/snapshot';
 import { decryptSnapshot, encryptSnapshot, encryptedSnapshotFileName, validateEncryptedSnapshot } from './snapshot-crypto';
 import { execResultToAudit, hashId, toAuditLine, type AuditEvent } from '../core/audit';
 import type { ExecResult, SessionMeta } from '../core/types';
@@ -108,6 +108,11 @@ async function main(): Promise<number> {
     console.error(USAGE);
     return 2;
   }
+  const links = dedupeLinks(parseLinks(rawLinks));
+  if (links.length === 0) {
+    console.error('没有解析到可处理的会话链接：请检查输入格式。');
+    return 2;
+  }
 
   let state: AccountState;
   try {
@@ -152,7 +157,6 @@ async function main(): Promise<number> {
 
   const index = buildIndex(sessions);
   const metaById = new Map(sessions.map(session => [session.id, session]));
-  const links = dedupeLinks(parseLinks(rawLinks));
 
   const mode: ReportMode = args.exportOnly ? 'export' : args.apply ? 'delete' : 'preflight';
   const writing = mode !== 'preflight';
@@ -266,7 +270,9 @@ async function main(): Promise<number> {
 
   const snapshotFiles = new Map<string, string>();
   const exportFailures = new Set<string>();
-  const reusable = args.resume && writing ? reusableSnapshots(storedProgress, join(outDir, 'snapshots')) : new Map<string, string>();
+  const reusable = args.resume && writing
+    ? reusableSnapshots(storedProgress, join(outDir, 'snapshots'), undefined, undefined, metaById)
+    : new Map<string, string>();
 
   // Snapshots are generated only on a real run: preflight must stay read-only.
   if (writing && args.snapshot && ids.length > 0) {
@@ -288,7 +294,7 @@ async function main(): Promise<number> {
           if (snapshotPassword) {
             const envelope = validateEncryptedSnapshot(JSON.parse(readFileSync(join(snapshotDir, reused), 'utf8')));
             const snapshot = validateSnapshot(decryptSnapshot(envelope, snapshotPassword));
-            if (snapshot.id !== id) throw new Error('快照会话 id 不匹配');
+            if (!snapshotMatchesMeta(snapshot, meta)) throw new Error('快照不是当前会话版本');
           }
           snapshotFiles.set(id, reused);
           console.log(`[snapshot] 复用 ${reused}`);
@@ -334,6 +340,19 @@ async function main(): Promise<number> {
   let results: ExecResult[] = [];
 
   if (mode === 'delete' && ids.length > 0) {
+    let savedSnapshots: Map<string, ReturnType<typeof validateSnapshot>>;
+    try {
+      savedSnapshots = new Map();
+      for (const [id, snapshotName] of snapshotFiles) {
+        savedSnapshots.set(id, snapshotName.endsWith('.enc.json')
+          ? validateSnapshot(decryptSnapshot(validateEncryptedSnapshot(JSON.parse(readFileSync(join(outDir, 'snapshots', snapshotName), 'utf8'))), snapshotPassword!))
+          : validateSnapshot(JSON.parse(readFileSync(join(outDir, 'snapshots', snapshotName), 'utf8'))));
+      }
+    } catch (error) {
+      console.error(`删除前快照校验失败，已中止：${error instanceof Error ? error.message : String(error)}`);
+      return 3;
+    }
+
     console.log('');
     results = await runQueue(
       transport,
@@ -346,6 +365,18 @@ async function main(): Promise<number> {
         shape: 'auto',
       },
       {
+        beforeDelete: async id => {
+          const freshIndex = buildIndex(await listSessions(transport));
+          const link = links.find(candidate => candidate.id === id);
+          const outcome = link ? guardLink(link, freshIndex, { protectPinned: args.protectPinned }) : undefined;
+          if (!outcome?.ok || !outcome.meta || outcome.meta.id !== id) {
+            throw new Error(`${id} 已不存在、归属变化或不再允许删除`);
+          }
+          const snapshot = savedSnapshots.get(id);
+          if (snapshot && !snapshotMatchesMeta(snapshot, outcome.meta)) {
+            throw new Error(`${id} 在快照生成后已更新，需重新预览并备份`);
+          }
+        },
         onStart: (id, position, total) => {
           process.stdout.write(`[${position + 1}/${total}] ${id.slice(0, 8)} … `);
         },
@@ -385,7 +416,18 @@ async function main(): Promise<number> {
     }
   }
 
-  if (mode === 'delete') results = reconcileDeletedResults(results, verify);
+  if (mode === 'delete') {
+    const reconciled = reconcileDeletedResults(results, verify);
+    for (let index = 0; index < results.length; index += 1) {
+      if (results[index].status === reconciled[index].status) continue;
+      auditEvents.push(execResultToAudit(reconciled[index], {
+        accountHash,
+        sourceLink: deletable.find(item => item.id === reconciled[index].id)?.link,
+        snapshot: snapshotFiles.get(reconciled[index].id),
+      }));
+    }
+    results = reconciled;
+  }
 
   const failed = results.filter(result => result.status === 'failed' || result.status === 'aborted');
   const stillThere = verify?.filter(entry => entry.stillThere) ?? [];

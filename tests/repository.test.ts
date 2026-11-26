@@ -16,23 +16,23 @@ function transportFor(pages: Array<Record<string, unknown>>): Transport {
 describe('listSessions pagination safety', () => {
   it('does not return a partial list when maxPages is exhausted', async () => {
     const transport = transportFor([
-      { chat_sessions: [{ id: 'a', updated_at: 3, seq_id: 3 }], has_more: true, next_cursor: 2 },
-      { chat_sessions: [{ id: 'b', updated_at: 2, seq_id: 2 }], has_more: true, next_cursor: 1 },
+      { chat_sessions: [{ id: 'a', updated_at: 3, seq_id: 3, pinned: false }], has_more: true, next_cursor: 2 },
+      { chat_sessions: [{ id: 'b', updated_at: 2, seq_id: 2, pinned: false }], has_more: true, next_cursor: 1 },
     ]);
     await expect(listSessions(transport, { maxPages: 2 })).rejects.toThrow(/最大页数/);
   });
 
   it('returns all pages when the final page confirms completion', async () => {
     const transport = transportFor([
-      { chat_sessions: [{ id: 'a', updated_at: 3, seq_id: 3 }], has_more: true, next_cursor: 2 },
-      { chat_sessions: [{ id: 'b', updated_at: 2, seq_id: 2 }], has_more: false },
+      { chat_sessions: [{ id: 'a', updated_at: 3, seq_id: 3, pinned: false }], has_more: true, next_cursor: 2 },
+      { chat_sessions: [{ id: 'b', updated_at: 2, seq_id: 2, pinned: false }], has_more: false },
     ]);
     const sessions = await listSessions(transport, { maxPages: 2 });
     expect(sessions.map(session => session.id)).toEqual(['a', 'b']);
   });
 
   it('refuses to loop when the server keeps returning the same page', async () => {
-    const page = { chat_sessions: [{ id: 'a', updated_at: 3, seq_id: 3 }], has_more: true, next_cursor: 3 };
+    const page = { chat_sessions: [{ id: 'a', updated_at: 3, seq_id: 3, pinned: false }], has_more: true, next_cursor: 3 };
     const transport = transportFor([page, page, page]);
     await expect(listSessions(transport, { maxPages: 10 })).rejects.toThrow(/游标未推进/);
   });
@@ -49,18 +49,34 @@ describe('listSessions pagination safety', () => {
 
   it('rejects invalid declared cursors instead of silently changing dialect', async () => {
     await expect(listSessions(transportFor([
-      { chat_sessions: [{ id: 'a', updated_at: 3, seq_id: 3 }], has_more: true, next_cursor: 'bad' },
+      { chat_sessions: [{ id: 'a', updated_at: 3, seq_id: 3, pinned: false }], has_more: true, next_cursor: 'bad' },
     ]))).rejects.toThrow(/next_cursor/);
     await expect(listSessions(transportFor([
-      { chat_sessions: [{ id: 'a', updated_at: 3, seq_id: false }], has_more: true },
+      { chat_sessions: [{ id: 'a', updated_at: 3, seq_id: false, pinned: false }], has_more: true },
     ]))).rejects.toThrow(/seq_id/);
+  });
+
+  it('rejects invalid session metadata instead of failing open', async () => {
+    const invalid = [
+      { id: '', updated_at: 1, pinned: false },
+      { id: 'a', updated_at: 1, pinned: 'true' },
+      { id: 'a', updated_at: 1 },
+      { id: 'a', updated_at: 1, pinned: null },
+      { id: 'a', updated_at: '1', pinned: false },
+      { id: 'a', updated_at: 1, pinned: false, seq_id: false },
+      { id: 'a', updated_at: 1, pinned: false, seq_id: '' },
+    ];
+
+    for (const session of invalid) {
+      await expect(listSessions(transportFor([{ chat_sessions: [session], has_more: false }]))).rejects.toThrow();
+    }
   });
 
   it('falls back to the time cursor when seq ids are null', async () => {
     const paths: string[] = [];
     const pages = [
-      { chat_sessions: [{ id: 'a', updated_at: 3, seq_id: null }], has_more: true },
-      { chat_sessions: [{ id: 'b', updated_at: 2, seq_id: null }], has_more: false },
+      { chat_sessions: [{ id: 'a', updated_at: 3, seq_id: null, pinned: false }], has_more: true },
+      { chat_sessions: [{ id: 'b', updated_at: 2, seq_id: null, pinned: false }], has_more: false },
     ];
     const transport: Transport = {
       async get<T>(path: string): Promise<ApiResult<T>> {
@@ -90,6 +106,21 @@ describe('getMessages validation', () => {
     await expect(getMessages(transportFor([{ chat_messages: [null] }]), 'session-1')).rejects.toThrow(/chat_messages/);
     await expect(getMessages(transportFor([{ chat_messages: [{ fragments: 'bad' }] }]), 'session-1')).rejects.toThrow(/fragments/);
     await expect(getMessages(transportFor([{ chat_messages: [{ message_id: 1, role: 'user', inserted_at: 1 }] }]), 'session-1')).rejects.toThrow(/fragments/);
+  });
+
+  it('rejects missing or coerced message fields', async () => {
+    const valid = { message_id: 1, role: 'user', inserted_at: 1, fragments: [{ type: 'text', content: 'ok' }] };
+    const invalid = [
+      { ...valid, message_id: '1' },
+      { ...valid, role: 1 },
+      { ...valid, inserted_at: undefined },
+      { ...valid, fragments: [{ type: 1, content: 'ok' }] },
+      { ...valid, fragments: [{ type: 'text', content: 1 }] },
+    ];
+
+    for (const message of invalid) {
+      await expect(getMessages(transportFor([{ chat_messages: [message] }]), 'session-1')).rejects.toThrow();
+    }
   });
 
   it('rejects a nonzero business code', async () => {

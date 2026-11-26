@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import { checkResumeAccount, completedIds, markSnapshots, mergeResults, readProgress, reconcileDeletedResults, reusableSnapshots, writeProgress } from '../src/cli/progress';
+import { encryptSnapshot } from '../src/cli/snapshot-crypto';
 import type { Snapshot } from '../src/core/snapshot';
 
 const TEMP_DIRS: string[] = [];
@@ -39,7 +40,8 @@ describe('resume bookkeeping', () => {
       schema: 'dsx.progress.v1',
       updatedAt: '',
       entries: {
-        a: { status: 'deleted', at: '' },
+        a: { status: 'deleted', at: '', verifiedAt: 'verified' },
+        legacy: { status: 'deleted', at: '' },
         b: { status: 'skipped', at: '' },
         c: { status: 'failed', at: '' },
         d: { status: 'snapshotted', at: '' },
@@ -56,12 +58,7 @@ describe('resume bookkeeping', () => {
     writeFileSync(join(dir, 'incomplete.json'), JSON.stringify({ schema: 'dsx.snapshot.v1', id: 'b' }), 'utf8');
     writeFileSync(join(dir, 'someone-else.json'), JSON.stringify({ ...snapshot, id: 'other' }), 'utf8');
     writeFileSync(join(dir, 'broken.json'), '{oops', 'utf8');
-    writeFileSync(join(dir, 'd.enc.json'), JSON.stringify({
-      schema: 'dsx.snapshot.enc.v1',
-      kdf: { name: 'scrypt', salt: 'salt', N: 1, r: 1, p: 1 },
-      cipher: { name: 'aes-256-gcm', iv: 'iv', tag: 'tag' },
-      data: 'ciphertext',
-    }), 'utf8');
+    writeFileSync(join(dir, 'd.enc.json'), JSON.stringify(encryptSnapshot({ ...snapshot, id: 'd' }, 'pw', Buffer.alloc(16, 1))), 'utf8');
     writeFileSync(join(dir, 'e.enc.json'), 'ciphertext', 'utf8');
     writeFileSync(join(dir, 'f.enc.json'), '', 'utf8');
 
@@ -82,6 +79,18 @@ describe('resume bookkeeping', () => {
 
     const reusable = reusableSnapshots(progress, dir);
     expect([...reusable.entries()]).toEqual([['a', 'a.json'], ['d', 'd.enc.json']]);
+  });
+
+  it('does not reuse a plaintext snapshot from an older session version', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'a.json'), JSON.stringify(snapshot), 'utf8');
+    const progress = markSnapshots(undefined, new Map([['a', 'a.json']]));
+    const meta = { id: snapshot.id, title: snapshot.title, pinned: snapshot.pinned, updatedAt: 2 };
+    const current = new Map([['a', meta]]);
+
+    expect(reusableSnapshots(progress, dir, undefined, undefined, current).has('a')).toBe(false);
+    meta.updatedAt = 1;
+    expect(reusableSnapshots(progress, dir, undefined, undefined, current).get('a')).toBe('a.json');
   });
 
   it('refuses to resume when the stored account differs from the current one', () => {
@@ -108,14 +117,26 @@ describe('resume bookkeeping', () => {
     expect(next.entries.a.snapshot).toBe('a.json');
   });
 
-  it('maps noop to deleted and ABORTED skips to aborted', () => {
+  it('marks only reconciled deletions as verified', () => {
+    const verified = mergeResults(undefined, [
+      { id: 'a', status: 'deleted', attempts: 1, ms: 1 },
+      { id: 'b', status: 'failed', attempts: 1, ms: 1 },
+    ], new Map(), new Date('2026-01-01T00:00:00.000Z'));
+
+    expect(completedIds(verified)).toEqual(new Set(['a']));
+    expect(verified.entries.a.verifiedAt).toBe('2026-01-01T00:00:00.000Z');
+    expect(verified.entries.b.verifiedAt).toBeUndefined();
+  });
+
+  it('does not trust an unverified noop and maps ABORTED skips to aborted', () => {
     const next = mergeResults(undefined, [
       { id: 'a', status: 'noop', attempts: 1, ms: 10 },
       { id: 'b', status: 'aborted', attempts: 0, ms: 0 },
       { id: 'c', status: 'skipped', attempts: 0, ms: 0, reason: 'ABORTED' },
     ]);
 
-    expect(next.entries.a.status).toBe('deleted');
+    expect(next.entries.a.status).toBe('failed');
+    expect(next.entries.a.verifiedAt).toBeUndefined();
     expect(next.entries.b.status).toBe('aborted');
     expect(next.entries.c.status).toBe('aborted');
   });

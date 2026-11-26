@@ -45,14 +45,15 @@ export async function runQueue(
       await sleep(index % options.batchSize === 0 ? options.batchPauseMs : options.intervalMs);
     }
 
-    hooks.onStart?.(id, index, ids.length);
-
     if (options.dryRun) {
+      hooks.onStart?.(id, index, ids.length);
       const dry: ExecResult = { id, status: 'skipped', attempts: 0, ms: 0, reason: 'DRY_RUN' };
       results.push(dry);
       hooks.onResult?.(dry);
       continue;
     }
+
+    hooks.onStart?.(id, index, ids.length);
 
     let requests = 0;
     let retriesUsed = 0;
@@ -61,6 +62,21 @@ export async function runQueue(
     let outcome: ExecResult | null = null;
 
     while (outcome === null) {
+      try {
+        await hooks.beforeDelete?.(id, index, ids.length);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        outcome = {
+          id,
+          status: 'failed',
+          attempts: requests,
+          ms: lastMs,
+          reason: `PRE_DELETE_VALIDATION_FAILED: ${message}`,
+        };
+        aborted = true;
+        break;
+      }
+
       requests += 1;
       const started = Date.now();
 
@@ -149,4 +165,17 @@ export async function runQueue(
   }
 
   return results;
+}
+
+export function reconcileDeletedResults(
+  results: ExecResult[],
+  verify: Array<{ id: string; stillThere: boolean }> | undefined,
+): ExecResult[] {
+  return results.map(result => {
+    if (result.status !== 'deleted' && result.status !== 'noop') return result;
+    const entry = verify?.find(item => item.id === result.id);
+    if (!entry) return { ...result, status: 'failed', reason: 'VERIFY_FAILED' };
+    if (entry.stillThere) return { ...result, status: 'failed', reason: 'VERIFY_STILL_THERE' };
+    return result.status === 'noop' ? { ...result, status: 'deleted' } : result;
+  });
 }
