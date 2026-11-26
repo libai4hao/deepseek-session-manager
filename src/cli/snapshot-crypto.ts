@@ -1,6 +1,7 @@
 import { createCipheriv, createDecipheriv, randomBytes, scryptSync } from 'node:crypto';
 
-import type { Snapshot } from '../core/snapshot';
+import { validateSnapshot, type Snapshot } from '../core/snapshot';
+import type { SessionMeta } from '../core/types';
 
 export interface EncryptedSnapshot {
   schema: 'dsx.snapshot.enc.v1';
@@ -38,21 +39,52 @@ export function encryptSnapshot(
   };
 }
 
-export function decryptSnapshot(envelope: EncryptedSnapshot, password: string): Snapshot {
-  if (envelope.schema !== 'dsx.snapshot.enc.v1') throw new Error('不是 dsx 加密快照');
+export function validateEncryptedSnapshot(value: unknown): EncryptedSnapshot {
+  const envelope = value as Partial<EncryptedSnapshot> | null;
+  if (
+    !envelope ||
+    envelope.schema !== 'dsx.snapshot.enc.v1' ||
+    !envelope.kdf ||
+    envelope.kdf.name !== 'scrypt' ||
+    typeof envelope.kdf.salt !== 'string' ||
+    !envelope.kdf.salt ||
+    !Number.isSafeInteger(envelope.kdf.N) ||
+    !Number.isSafeInteger(envelope.kdf.r) ||
+    !Number.isSafeInteger(envelope.kdf.p) ||
+    !envelope.cipher ||
+    envelope.cipher.name !== 'aes-256-gcm' ||
+    typeof envelope.cipher.iv !== 'string' ||
+    !envelope.cipher.iv ||
+    typeof envelope.cipher.tag !== 'string' ||
+    !envelope.cipher.tag ||
+    typeof envelope.data !== 'string' ||
+    !envelope.data
+  ) {
+    throw new Error('加密快照结构无效');
+  }
+  return envelope as EncryptedSnapshot;
+}
 
-  const salt = Buffer.from(envelope.kdf.salt, 'base64');
-  const iv = Buffer.from(envelope.cipher.iv, 'base64');
-  const tag = Buffer.from(envelope.cipher.tag, 'base64');
+export function decryptSnapshot(envelope: EncryptedSnapshot, password: string): Snapshot {
+  const validEnvelope = validateEncryptedSnapshot(envelope);
+  const salt = Buffer.from(validEnvelope.kdf.salt, 'base64');
+  const iv = Buffer.from(validEnvelope.cipher.iv, 'base64');
+  const tag = Buffer.from(validEnvelope.cipher.tag, 'base64');
 
   const decipher = createDecipheriv('aes-256-gcm', deriveKey(password, salt), iv);
   decipher.setAuthTag(tag);
-  const plaintext = Buffer.concat([decipher.update(Buffer.from(envelope.data, 'base64')), decipher.final()]);
+  const plaintext = Buffer.concat([decipher.update(Buffer.from(validEnvelope.data, 'base64')), decipher.final()]);
 
-  return JSON.parse(plaintext.toString('utf8')) as Snapshot;
+  return validateSnapshot(JSON.parse(plaintext.toString('utf8')));
 }
 
-/** `<yyyyMMdd>_<slug>_<id8>.enc.json` keeps encrypted and plain files distinguishable. */
+/** `<yyyyMMdd>_<id>.enc.json` keeps encrypted backups free of title metadata. */
+export function encryptedSnapshotFileName(meta: SessionMeta): string {
+  const safeId = meta.id.replace(/[\\/:*?"<>|\s]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'unknown';
+  const date = new Date(meta.updatedAt * 1000).toISOString().slice(0, 10).replace(/-/g, '');
+  return `${date}_${safeId}.enc.json`;
+}
+
 export function encryptedFileName(plainName: string): string {
   return plainName.replace(/\.json$/, '.enc.json');
 }

@@ -19,6 +19,42 @@ export interface Snapshot {
   messages: SnapshotMessage[];
 }
 
+export function validateSnapshot(value: unknown): Snapshot {
+  const snapshot = value as Partial<Snapshot> | null;
+  if (
+    !snapshot ||
+    snapshot.schema !== 'dsx.snapshot.v1' ||
+    typeof snapshot.id !== 'string' ||
+    !snapshot.id ||
+    typeof snapshot.title !== 'string' ||
+    typeof snapshot.pinned !== 'boolean' ||
+    typeof snapshot.updatedAt !== 'number' ||
+    !Number.isFinite(snapshot.updatedAt) ||
+    typeof snapshot.capturedAt !== 'string' ||
+    !Array.isArray(snapshot.messages) ||
+    snapshot.messageCount !== snapshot.messages.length
+  ) {
+    throw new Error('快照结构无效');
+  }
+
+  for (const message of snapshot.messages) {
+    if (
+      !message ||
+      typeof message.messageId !== 'number' ||
+      !Number.isFinite(message.messageId) ||
+      typeof message.role !== 'string' ||
+      typeof message.insertedAt !== 'number' ||
+      !Number.isFinite(message.insertedAt) ||
+      typeof message.type !== 'string' ||
+      typeof message.content !== 'string'
+    ) {
+      throw new Error('快照消息结构无效');
+    }
+  }
+
+  return snapshot as Snapshot;
+}
+
 export function buildSnapshot(
   meta: SessionMeta,
   messages: ChatMessage[],
@@ -54,8 +90,9 @@ export function snapshotFileName(meta: SessionMeta): string {
       .replace(/^_|_$/g, '')
       .slice(0, 40) || 'untitled';
 
+  const safeId = meta.id.replace(/[\\/:*?"<>|\s]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '') || 'unknown';
   const date = new Date(meta.updatedAt * 1000).toISOString().slice(0, 10).replace(/-/g, '');
-  return `${date}_${slug}_${meta.id.slice(0, 8)}.json`;
+  return `${date}_${slug}_${safeId}.json`;
 }
 
 export function summarizeSnapshot(snapshot: Snapshot): string {

@@ -12,12 +12,16 @@
     "dsx": "dist/dsx-cli.mjs"
   },
   "files": [
-    "dist",
+    "dist/dsx-cli.mjs",
+    "dist/dsx.user.js",
+    "dist/extension/dsx.js",
+    "dist/extension/manifest.json",
     "docs",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
+    "prepack": "node scripts/build.mjs",
     "build": "node scripts/build.mjs",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",

@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { runQueue } from '../src/core/executor';
+import { ApiFailure } from '../src/core/http';
 import type { ApiResult, ExecOptions, Transport } from '../src/core/types';
 
 const IDS = ['id-one-0001', 'id-two-0002', 'id-three-0003'];
@@ -67,6 +68,41 @@ describe('runQueue', () => {
     expect(bodies[1]).toEqual({ chat_session_ids: [IDS[0]] });
   });
 
+  it('still sends the array shape when retries are zero', async () => {
+    const { transport, bodies } = makeTransport([
+      () => ({ http: 422, code: 422 }),
+      () => ({ http: 200, code: 0 }),
+    ]);
+
+    const results = await runQueue(transport, [IDS[0]], fastOptions({ retries: 0 }));
+
+    expect(bodies).toEqual([
+      { chat_session_id: IDS[0] },
+      { chat_session_ids: [IDS[0]] },
+    ]);
+    expect(results[0]).toMatchObject({ status: 'deleted', attempts: 2 });
+  });
+
+  it('does not charge a shape probe against the retry budget', async () => {
+    let call = 0;
+    const transport: Transport = {
+      async get<T>(): Promise<ApiResult<T>> {
+        return { http: 200, code: 0 } as ApiResult<T>;
+      },
+      async post<T>(): Promise<ApiResult<T>> {
+        call += 1;
+        if (call === 1) throw new Error('ECONNRESET');
+        if (call === 2) return { http: 422, code: 422 } as ApiResult<T>;
+        return { http: 200, code: 0 } as ApiResult<T>;
+      },
+    };
+
+    const results = await runQueue(transport, [IDS[0]], fastOptions({ retries: 1 }));
+
+    expect(call).toBe(3);
+    expect(results[0]).toMatchObject({ status: 'deleted', attempts: 3 });
+  });
+
   it('aborts the queue when the token is invalid', async () => {
     const { transport } = makeTransport([
       () => ({ http: 200, code: 0 }),
@@ -79,6 +115,46 @@ describe('runQueue', () => {
     expect(results[1].status).toBe('aborted');
     expect(results[2].status).toBe('skipped');
     expect(results[2].reason).toBe('ABORTED');
+  });
+
+  it('aborts when the transport preserves an HTTP auth failure', async () => {
+    let calls = 0;
+    const transport: Transport = {
+      async get<T>(): Promise<ApiResult<T>> { return { http: 200, code: 0 } as ApiResult<T>; },
+      async post<T>(): Promise<ApiResult<T>> {
+        calls += 1;
+        throw new ApiFailure({ http: 401, code: 401 }, '接口响应不是合法 JSON');
+      },
+    };
+
+    const results = await runQueue(transport, IDS, fastOptions());
+
+    expect(calls).toBe(1);
+    expect(results[0]).toMatchObject({ status: 'aborted', reason: 'AUTH_FAILED' });
+    expect(results[1]).toMatchObject({ status: 'skipped', reason: 'ABORTED' });
+    expect(results[2]).toMatchObject({ status: 'skipped', reason: 'ABORTED' });
+  });
+
+  it('keeps the forbidden cooldown for transport failures with HTTP status', async () => {
+    let calls = 0;
+    const sleeps: number[] = [];
+    const transport: Transport = {
+      async get<T>(): Promise<ApiResult<T>> { return { http: 200, code: 0 } as ApiResult<T>; },
+      async post<T>(): Promise<ApiResult<T>> {
+        calls += 1;
+        if (calls === 1) throw new ApiFailure({ http: 403, code: 403 }, '接口响应不是合法 JSON');
+        return { http: 200, code: 0 } as ApiResult<T>;
+      },
+    };
+
+    const results = await runQueue(transport, [IDS[0]], fastOptions({
+      retries: 1,
+      sleep: async ms => { sleeps.push(ms); },
+    }));
+
+    expect(calls).toBe(2);
+    expect(sleeps).toEqual([30_000]);
+    expect(results[0].status).toBe('deleted');
   });
 
   it('retries a 5xx response and then succeeds', async () => {

@@ -1,13 +1,40 @@
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
-import { checkResumeAccount, completedIds, markSnapshots, mergeResults, readProgress, reusableSnapshots, writeProgress } from '../src/cli/progress';
+import { checkResumeAccount, completedIds, markSnapshots, mergeResults, readProgress, reconcileDeletedResults, reusableSnapshots, writeProgress } from '../src/cli/progress';
+import type { Snapshot } from '../src/core/snapshot';
+
+const TEMP_DIRS: string[] = [];
+
+afterEach(() => {
+  while (TEMP_DIRS.length > 0) {
+    const dir = TEMP_DIRS.pop();
+    if (dir) rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function tempDir(): string {
+  const dir = mkdtempSync(join(tmpdir(), 'dsx-progress-'));
+  TEMP_DIRS.push(dir);
+  return dir;
+}
+
+const snapshot: Snapshot = {
+  schema: 'dsx.snapshot.v1',
+  id: 'a',
+  title: 'title',
+  pinned: false,
+  updatedAt: 1,
+  capturedAt: '2026-01-01T00:00:00.000Z',
+  messageCount: 0,
+  messages: [],
+};
 
 describe('resume bookkeeping', () => {
-  it('treats deleted and skipped as finished, but not failed', () => {
+  it('treats only confirmed deletions as finished', () => {
     const done = completedIds({
       schema: 'dsx.progress.v1',
       updatedAt: '',
@@ -16,31 +43,40 @@ describe('resume bookkeeping', () => {
         b: { status: 'skipped', at: '' },
         c: { status: 'failed', at: '' },
         d: { status: 'snapshotted', at: '' },
+        e: { status: 'aborted', at: '' },
       },
     });
 
-    expect([...done].sort()).toEqual(['a', 'b']);
+    expect([...done]).toEqual(['a']);
   });
 
-  it('reuses only snapshots that exist, stay inside the directory and belong to the same session', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'dsx-progress-'));
-    writeFileSync(join(dir, 'a.json'), JSON.stringify({ schema: 'dsx.snapshot.v1', id: 'a' }), 'utf8');
-    writeFileSync(join(dir, 'someone-else.json'), JSON.stringify({ schema: 'dsx.snapshot.v1', id: 'other' }), 'utf8');
+  it('reuses only complete snapshots that stay inside the directory and match the session', () => {
+    const dir = tempDir();
+    writeFileSync(join(dir, 'a.json'), JSON.stringify(snapshot), 'utf8');
+    writeFileSync(join(dir, 'incomplete.json'), JSON.stringify({ schema: 'dsx.snapshot.v1', id: 'b' }), 'utf8');
+    writeFileSync(join(dir, 'someone-else.json'), JSON.stringify({ ...snapshot, id: 'other' }), 'utf8');
     writeFileSync(join(dir, 'broken.json'), '{oops', 'utf8');
-    writeFileSync(join(dir, 'd.enc.json'), 'ciphertext', 'utf8');
-    writeFileSync(join(dir, 'e.enc.json'), '', 'utf8');
+    writeFileSync(join(dir, 'd.enc.json'), JSON.stringify({
+      schema: 'dsx.snapshot.enc.v1',
+      kdf: { name: 'scrypt', salt: 'salt', N: 1, r: 1, p: 1 },
+      cipher: { name: 'aes-256-gcm', iv: 'iv', tag: 'tag' },
+      data: 'ciphertext',
+    }), 'utf8');
+    writeFileSync(join(dir, 'e.enc.json'), 'ciphertext', 'utf8');
+    writeFileSync(join(dir, 'f.enc.json'), '', 'utf8');
 
     const progress = {
       schema: 'dsx.progress.v1' as const,
       updatedAt: '',
       entries: {
         a: { status: 'failed' as const, at: '', snapshot: 'a.json' },
-        b: { status: 'failed' as const, at: '', snapshot: 'gone.json' },
+        b: { status: 'failed' as const, at: '', snapshot: 'incomplete.json' },
         c: { status: 'failed' as const, at: '', snapshot: '../outside.json' },
         x: { status: 'failed' as const, at: '', snapshot: 'someone-else.json' },
         y: { status: 'failed' as const, at: '', snapshot: 'broken.json' },
         d: { status: 'failed' as const, at: '', snapshot: 'd.enc.json' },
         e: { status: 'failed' as const, at: '', snapshot: 'e.enc.json' },
+        f: { status: 'failed' as const, at: '', snapshot: 'f.enc.json' },
       },
     };
 
@@ -72,19 +108,38 @@ describe('resume bookkeeping', () => {
     expect(next.entries.a.snapshot).toBe('a.json');
   });
 
-  it('maps noop to deleted so a rerun does not touch it again', () => {
+  it('maps noop to deleted and ABORTED skips to aborted', () => {
     const next = mergeResults(undefined, [
       { id: 'a', status: 'noop', attempts: 1, ms: 10 },
       { id: 'b', status: 'aborted', attempts: 0, ms: 0 },
+      { id: 'c', status: 'skipped', attempts: 0, ms: 0, reason: 'ABORTED' },
     ]);
 
     expect(next.entries.a.status).toBe('deleted');
     expect(next.entries.b.status).toBe('aborted');
+    expect(next.entries.c.status).toBe('aborted');
+  });
+
+  it('does not mark deletions complete when verification fails or still finds them', () => {
+    const results = [
+      { id: 'a', status: 'deleted' as const, attempts: 1, ms: 1 },
+      { id: 'b', status: 'deleted' as const, attempts: 1, ms: 1 },
+      { id: 'c', status: 'deleted' as const, attempts: 1, ms: 1 },
+    ];
+
+    expect(reconcileDeletedResults(results, [
+      { id: 'a', stillThere: false },
+      { id: 'b', stillThere: true },
+    ]).map(result => [result.id, result.status, result.reason])).toEqual([
+      ['a', 'deleted', undefined],
+      ['b', 'failed', 'VERIFY_STILL_THERE'],
+      ['c', 'failed', 'VERIFY_FAILED'],
+    ]);
+    expect(reconcileDeletedResults(results, undefined).every(result => result.status === 'failed')).toBe(true);
   });
 
   it('writes progress through a completed replacement and leaves no temp file', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'dsx-progress-'));
-    const path = join(dir, 'progress.json');
+    const path = join(tempDir(), 'progress.json');
     const progress = markSnapshots(undefined, new Map([['session-1', 'one.json']]));
     writeProgress(path, progress);
     expect(JSON.parse(readFileSync(path, 'utf8')).entries['session-1'].snapshot).toBe('one.json');
@@ -92,11 +147,10 @@ describe('resume bookkeeping', () => {
   });
 
   it('survives a corrupt progress file', () => {
-    const dir = mkdtempSync(join(tmpdir(), 'dsx-progress-'));
-    const path = join(dir, 'progress.json');
+    const path = join(tempDir(), 'progress.json');
     writeFileSync(path, '{not json', 'utf8');
 
     expect(readProgress(path)).toBeUndefined();
-    expect(readProgress(join(dir, 'missing.json'))).toBeUndefined();
+    expect(readProgress(join(tempDir(), 'missing.json'))).toBeUndefined();
   });
 });

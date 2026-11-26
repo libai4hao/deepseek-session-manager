@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { dedupeLinks, parseLink, parseLinks, stripNoise } from '../src/core/parser';
+import { dedupeLinks, parseLink, parseLinks, sanitizeLinkForReport, stripNoise } from '../src/core/parser';
 
 const ID = '43d6c267-1f2e-4a3b-9c5d-1234567890ab';
 
@@ -69,5 +69,17 @@ describe('dedupeLinks', () => {
     ]);
     const deduped = dedupeLinks(links);
     expect(deduped).toHaveLength(2);
+  });
+});
+
+describe('sanitizeLinkForReport', () => {
+  it('keeps only the canonical session URL', () => {
+    const link = parseLink(`https://chat.deepseek.com/a/chat/s/${ID}?token=secret#fragment`);
+    expect(sanitizeLinkForReport(link)).toBe(`https://chat.deepseek.com/a/chat/s/${ID}`);
+  });
+
+  it('removes URL credentials, query and hash from rejected links', () => {
+    const link = parseLink('https://user:pass@example.com/path?token=secret#fragment');
+    expect(sanitizeLinkForReport(link)).toBe('https://example.com/path');
   });
 });

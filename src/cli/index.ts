@@ -1,20 +1,21 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { ApiFailure, authHeaders, classifyResult } from '../core/http';
 import { createFetchTransport } from '../core/transport';
-import { dedupeLinks, parseLinks, splitLines } from '../core/parser';
+import { dedupeLinks, parseLinks, sanitizeLinkForReport, splitLines } from '../core/parser';
 import { buildIndex, guardLink } from '../core/guard';
 import { getAccountId, getMessages, listSessions, verifyDeleted } from '../core/repository';
 import { runQueue } from '../core/executor';
-import { buildSnapshot, snapshotFileName } from '../core/snapshot';
-import { encryptSnapshot, encryptedFileName } from './snapshot-crypto';
+import { buildSnapshot, snapshotFileName, validateSnapshot } from '../core/snapshot';
+import { decryptSnapshot, encryptSnapshot, encryptedSnapshotFileName, validateEncryptedSnapshot } from './snapshot-crypto';
 import { execResultToAudit, hashId, toAuditLine, type AuditEvent } from '../core/audit';
 import type { ExecResult, SessionMeta } from '../core/types';
 import { parseArgs, USAGE, type CliArgs } from './args';
-import { checkResumeAccount, completedIds, markSnapshots, mergeResults, progressPath, readProgress, reusableSnapshots, writeProgress } from './progress';
+import { checkResumeAccount, completedIds, markSnapshots, mergeResults, progressPath, readProgress, reconcileDeletedResults, reusableSnapshots, writeProgress } from './progress';
 import { readStorageState, type AccountState } from './state';
-import { renderMarkdown, type PlanItem, type Report, type ReportMode } from './report';
+import { renderMarkdown, resolveExitCode, type PlanItem, type Report, type ReportMode } from './report';
+import { ensureWebCrypto } from './runtime';
 
 const BASE_URL = 'https://chat.deepseek.com';
 const HARD_BATCH_LIMIT = 50;
@@ -66,6 +67,8 @@ function printPlan(items: PlanItem[]): void {
 }
 
 async function main(): Promise<number> {
+  ensureWebCrypto();
+
   let args: CliArgs;
   try {
     args = parseArgs(process.argv.slice(2));
@@ -92,7 +95,12 @@ async function main(): Promise<number> {
       console.error(`找不到链接文件：${args.file}`);
       return 2;
     }
-    rawLinks.push(...splitLines(readFileSync(args.file, 'utf8')));
+    try {
+      rawLinks.push(...splitLines(readFileSync(args.file, 'utf8')));
+    } catch (error) {
+      console.error(`读取链接文件失败：${error instanceof Error ? error.message : String(error)}`);
+      return 2;
+    }
   }
 
   if (rawLinks.length === 0) {
@@ -101,7 +109,13 @@ async function main(): Promise<number> {
     return 2;
   }
 
-  const state = loadState(args);
+  let state: AccountState;
+  try {
+    state = loadState(args);
+  } catch (error) {
+    console.error(`读取登录态失败：${error instanceof Error ? error.message : String(error)}`);
+    return 2;
+  }
   if (!state.token) {
     console.error('缺少登录凭证：用 --state 指向 Playwright storageState，或设置 DSX_TOKEN。');
     return 3;
@@ -168,32 +182,39 @@ async function main(): Promise<number> {
   const doneIds = completedIds(storedProgress);
 
   const plan: PlanItem[] = links.map(link => {
+    const reportLink = sanitizeLinkForReport(link);
+    if (link.kind === 'session' && link.id && doneIds.has(link.id)) {
+      const meta = metaById.get(link.id);
+      return {
+        link: reportLink,
+        kind: link.kind,
+        id: link.id,
+        title: maskTitle(meta?.title ?? link.id, args.maskTitle),
+        updatedAt: meta?.updatedAt,
+        pinned: meta?.pinned,
+        action: 'skip',
+        code: 'RESUME_DONE',
+        detail: '断点续跑：该会话已完成，跳过',
+      };
+    }
+
     const outcome = guardLink(link, index, { protectPinned: args.protectPinned });
 
     if (outcome.ok && outcome.meta) {
-      const base = {
-        link: link.raw,
+      return {
+        link: reportLink,
         kind: link.kind,
         id: outcome.meta.id,
         title: maskTitle(outcome.meta.title, args.maskTitle),
         updatedAt: outcome.meta.updatedAt,
         pinned: outcome.meta.pinned,
+        action: 'delete',
+        detail: '归属校验通过',
       };
-
-      if (doneIds.has(outcome.meta.id)) {
-        return {
-          ...base,
-          action: 'skip',
-          code: 'RESUME_DONE',
-          detail: '断点续跑：该会话已完成，跳过',
-        };
-      }
-
-      return { ...base, action: 'delete', detail: '归属校验通过' };
     }
 
     return {
-      link: link.raw,
+      link: reportLink,
       kind: link.kind,
       id: link.id,
       title: link.id,
@@ -257,17 +278,30 @@ async function main(): Promise<number> {
       if (!meta) continue;
 
       const reused = reusable.get(id);
-      if (reused) {
-        snapshotFiles.set(id, reused);
-        console.log(`[snapshot] 复用 ${reused}`);
-        continue;
+      const encryptionMatches = reused
+        ? snapshotPassword
+          ? reused.endsWith('.enc.json')
+          : !reused.endsWith('.enc.json')
+        : false;
+      if (reused && encryptionMatches) {
+        try {
+          if (snapshotPassword) {
+            const envelope = validateEncryptedSnapshot(JSON.parse(readFileSync(join(snapshotDir, reused), 'utf8')));
+            const snapshot = validateSnapshot(decryptSnapshot(envelope, snapshotPassword));
+            if (snapshot.id !== id) throw new Error('快照会话 id 不匹配');
+          }
+          snapshotFiles.set(id, reused);
+          console.log(`[snapshot] 复用 ${reused}`);
+          continue;
+        } catch (error) {
+          console.log(`[snapshot] 复用失败，将重新抓取 ${reused}：${error instanceof Error ? error.message : String(error)}`);
+        }
       }
 
       try {
         const messages = await getMessages(transport, id);
         const snapshot = buildSnapshot(meta, messages);
-        const plainName = snapshotFileName(meta);
-        const fileName = snapshotPassword ? encryptedFileName(plainName) : plainName;
+        const fileName = snapshotPassword ? encryptedSnapshotFileName(meta) : snapshotFileName(meta);
         const body = snapshotPassword
           ? JSON.stringify(encryptSnapshot(snapshot, snapshotPassword), null, 2)
           : JSON.stringify(snapshot, null, 2);
@@ -292,6 +326,7 @@ async function main(): Promise<number> {
       if (item.action !== 'delete' || !item.id) continue;
       const file = snapshotFiles.get(item.id);
       item.detail = file ? `已导出 ${file}` : exportFailures.has(item.id) ? '导出失败' : '未导出';
+      item.code = file ? 'EXPORTED' : 'EXPORT_FAILED';
       if (file) console.log(`[export] ${file}`);
     }
   }
@@ -330,6 +365,7 @@ async function main(): Promise<number> {
   }
 
   let verify: Array<{ id: string; stillThere: boolean }> | undefined;
+  let verifyFailed = false;
   if (mode === 'delete' && ids.length > 0) {
     try {
       verify = await verifyDeleted(transport, ids);
@@ -344,9 +380,12 @@ async function main(): Promise<number> {
         });
       }
     } catch (error) {
+      verifyFailed = true;
       console.error(`[verify] 复核失败：${String(error)}`);
     }
   }
+
+  if (mode === 'delete') results = reconcileDeletedResults(results, verify);
 
   const failed = results.filter(result => result.status === 'failed' || result.status === 'aborted');
   const stillThere = verify?.filter(entry => entry.stillThere) ?? [];
@@ -386,7 +425,8 @@ async function main(): Promise<number> {
 
   writeFileSync(join(outDir, 'report.json'), JSON.stringify(report, null, 2), 'utf8');
   writeFileSync(join(outDir, 'report.md'), renderMarkdown(report), 'utf8');
-  writeFileSync(join(outDir, 'audit.jsonl'), auditEvents.map(toAuditLine).join('\n') + '\n', 'utf8');
+  const auditBody = auditEvents.map(toAuditLine).join('\n');
+  if (auditBody) appendFileSync(join(outDir, 'audit.jsonl'), auditBody + '\n', 'utf8');
 
   if (mode === 'export') {
     console.log(`\n汇总：导出 ${snapshotFiles.size} 条，失败 ${exportFailures.size} 条；未删除任何会话。`);
@@ -397,10 +437,23 @@ async function main(): Promise<number> {
   }
   console.log(`报告与审计已写入 ${outDir}`);
 
-  if (mode === 'export') return exportFailures.size > 0 ? 2 : plan.length > 0 && deletable.length === 0 ? 2 : 0;
-  if (mode === 'delete' && plan.length > 0 && deletable.length === 0) return 2;
-  return failed.length > 0 || stillThere.length > 0 ? 2 : 0;
+  const rejected = plan.filter(item => item.action === 'reject').length;
+  return resolveExitCode({
+    mode,
+    rejected,
+    failed: failed.length,
+    aborted: results.filter(result => result.status === 'aborted').length,
+    stillThere: stillThere.length,
+    exportFailed: exportFailures.size,
+    verifyFailed,
+  });
 }
 
-const exitCode = await main();
+let exitCode: number;
+try {
+  exitCode = await main();
+} catch (error) {
+  console.error(`执行失败：${error instanceof Error ? error.message : String(error)}`);
+  exitCode = 3;
+}
 process.exit(exitCode);

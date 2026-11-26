@@ -1,4 +1,4 @@
-import { normalizeApiResult } from './http';
+import { ApiFailure, normalizeApiResult } from './http';
 import type { ApiResult, Transport } from './types';
 
 export interface FetchTransportOptions {
@@ -24,11 +24,15 @@ export function createFetchTransport(options: FetchTransportOptions): Transport 
         signal: controller.signal,
       });
 
-      let payload: unknown = null;
+      let payload: unknown;
       try {
         payload = await response.json();
-      } catch {
-        payload = null;
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') throw error;
+        throw new ApiFailure(
+          normalizeApiResult(response.status, undefined),
+          `接口响应不是合法 JSON（http=${response.status}, path=${path}）`,
+        );
       }
 
       return normalizeApiResult(response.status, payload);

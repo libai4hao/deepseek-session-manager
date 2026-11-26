@@ -15,6 +15,22 @@ export interface PlanItem {
   detail?: string;
 }
 
+export interface CliExitInput {
+  mode: ReportMode;
+  rejected: number;
+  failed: number;
+  aborted: number;
+  stillThere: number;
+  exportFailed: number;
+  verifyFailed: boolean;
+}
+
+export function resolveExitCode(input: CliExitInput): number {
+  if (input.mode === 'export') return input.exportFailed > 0 || input.rejected > 0 ? 2 : 0;
+  if (input.mode === 'delete' && (input.aborted > 0 || input.verifyFailed)) return 3;
+  return input.failed > 0 || input.stillThere > 0 || input.rejected > 0 ? 2 : 0;
+}
+
 export interface Report {
   schema: 'dsx.report.v1';
   generatedAt: string;
@@ -65,7 +81,11 @@ export function renderMarkdown(report: Report): string {
       ? `${result.status}${result.reason ? ` (${result.reason})` : ''}`
       : item.action === 'delete'
         ? report.mode === 'export'
-          ? 'exported'
+          ? item.code === 'EXPORTED'
+            ? 'exported'
+            : item.code === 'EXPORT_FAILED'
+              ? 'export-failed'
+              : 'not-exported'
           : 'planned'
         : item.action === 'skip'
           ? `skip: ${item.code ?? '-'}`

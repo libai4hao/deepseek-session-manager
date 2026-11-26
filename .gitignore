@@ -4,6 +4,7 @@ node_modules/
 
 # build output
 dist/
+.dsx-signing/
 *.tsbuildinfo
 
 # runtime output (may contain chat content)

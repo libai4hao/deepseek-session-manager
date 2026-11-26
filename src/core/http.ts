@@ -20,7 +20,7 @@ export function normalizeApiResult<T = unknown>(http: number, payload: unknown):
 
   return {
     http,
-    code: typeof top['code'] === 'number' ? (top['code'] as number) : http === 200 ? 0 : http,
+    code: typeof top['code'] === 'number' ? (top['code'] as number) : http,
     bizCode: typeof wrapper['biz_code'] === 'number' ? (wrapper['biz_code'] as number) : undefined,
     bizMsg: typeof wrapper['biz_msg'] === 'string' ? (wrapper['biz_msg'] as string) : undefined,
     data: (wrapper['biz_data'] ?? undefined) as T | undefined,

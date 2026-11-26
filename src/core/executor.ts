@@ -1,4 +1,4 @@
-import { classifyResult } from './http';
+import { ApiFailure, classifyResult } from './http';
 import type { ApiResult, DeleteShape, ExecHooks, ExecOptions, ExecResult, Transport } from './types';
 
 const defaultSleep = (ms: number): Promise<void> => new Promise(resolve => setTimeout(resolve, ms));
@@ -54,31 +54,39 @@ export async function runQueue(
       continue;
     }
 
-    let attempts = 0;
+    let requests = 0;
+    let retriesUsed = 0;
     let lastReason = 'UNKNOWN';
     let lastMs = 0;
     let outcome: ExecResult | null = null;
 
-    while (outcome === null && attempts < options.retries + 1) {
-      attempts += 1;
+    while (outcome === null) {
+      requests += 1;
       const started = Date.now();
 
       let response: ApiResult<unknown> | null = null;
       try {
         response = await deleteSession(transport, id, shape.current === 'auto' ? 'single' : shape.current);
       } catch (error) {
-        // Distinguish a hung connection from an HTTP-level failure so reports stay diagnosable.
         const message = error instanceof Error ? error.message : 'NETWORK';
-        const isTimeout = error instanceof Error && (error.name === 'AbortError' || message.includes('超时'));
-        lastReason = isTimeout ? `TIMEOUT: ${message}` : message;
+        if (error instanceof ApiFailure) {
+          response = error.result;
+          lastReason = message;
+        } else {
+          const isTimeout = error instanceof Error && (error.name === 'AbortError' || message.includes('超时'));
+          lastReason = isTimeout ? `TIMEOUT: ${message}` : message;
+        }
       }
       lastMs = Date.now() - started;
 
       if (!response) {
-        if (attempts < options.retries + 1) {
-          await sleep(backoff[Math.min(attempts - 1, backoff.length - 1)] ?? 4000);
+        if (retriesUsed < options.retries) {
+          const backoffIndex = retriesUsed;
+          retriesUsed += 1;
+          await sleep(backoff[Math.min(backoffIndex, backoff.length - 1)] ?? 4000);
+          continue;
         }
-        continue;
+        break;
       }
 
       const kind = classifyResult(response);
@@ -86,11 +94,11 @@ export async function runQueue(
       if (kind === 'ok') {
         const bizOk = response.bizCode === undefined || response.bizCode === 0;
         outcome = bizOk
-          ? { id, status: 'deleted', attempts, ms: lastMs }
+          ? { id, status: 'deleted', attempts: requests, ms: lastMs }
           : {
               id,
               status: 'failed',
-              attempts,
+              attempts: requests,
               ms: lastMs,
               reason: response.bizMsg ?? `biz_code=${response.bizCode ?? 'unknown'}`,
             };
@@ -104,33 +112,35 @@ export async function runQueue(
           lastReason = 'SHAPE_SWITCHED';
           continue;
         }
-        outcome = { id, status: 'failed', attempts, ms: lastMs, reason: 'SCHEMA_MISMATCH' };
+        outcome = { id, status: 'failed', attempts: requests, ms: lastMs, reason: 'SCHEMA_MISMATCH' };
         break;
       }
 
       if (kind === 'auth') {
-        outcome = { id, status: 'aborted', attempts, ms: lastMs, reason: 'AUTH_FAILED' };
+        outcome = { id, status: 'aborted', attempts: requests, ms: lastMs, reason: 'AUTH_FAILED' };
         aborted = true;
         break;
       }
 
       lastReason = kind.toUpperCase();
 
-      if (kind === 'forbidden') {
-        if (attempts < options.retries + 1) await sleep(cooldownMs);
-      } else if (kind === 'rate' || kind === 'server') {
-        if (attempts < options.retries + 1) {
-          await sleep(backoff[Math.min(attempts - 1, backoff.length - 1)] ?? 4000);
+      if (kind === 'forbidden' || kind === 'rate' || kind === 'server') {
+        if (retriesUsed < options.retries) {
+          const backoffIndex = retriesUsed;
+          retriesUsed += 1;
+          await sleep(kind === 'forbidden' ? cooldownMs : backoff[Math.min(backoffIndex, backoff.length - 1)] ?? 4000);
+          continue;
         }
-      } else {
-        outcome = { id, status: 'failed', attempts, ms: lastMs, reason: response.bizMsg ?? kind };
+        break;
       }
+
+      outcome = { id, status: 'failed', attempts: requests, ms: lastMs, reason: response.bizMsg ?? kind };
     }
 
     const final: ExecResult = outcome ?? {
       id,
       status: 'failed',
-      attempts,
+      attempts: requests,
       ms: lastMs,
       reason: lastReason,
     };

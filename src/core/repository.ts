@@ -4,9 +4,28 @@ import type { ChatMessage, SessionMeta, Transport } from './types';
 const DEFAULT_PAGE_SIZE = 100;
 const DEFAULT_MAX_PAGES = 200;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
 function num(value: unknown, fallback = 0): number {
   const parsed = typeof value === 'number' ? value : Number(value);
   return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function optionalNum(value: unknown): number | undefined {
+  if (value === undefined || value === null || (typeof value === 'string' && value.trim() === '')) return undefined;
+  if (typeof value !== 'number' && typeof value !== 'string') return undefined;
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function cursorNum(value: unknown, field: string): number | undefined {
+  const parsed = optionalNum(value);
+  if (parsed === undefined && value !== undefined && value !== null && !(typeof value === 'string' && value.trim() === '')) {
+    throw new Error(`分页字段 ${field} 无效；拒绝返回不完整会话列表`);
+  }
+  return parsed;
 }
 
 function toMeta(raw: Record<string, unknown>): SessionMeta | undefined {
@@ -19,7 +38,7 @@ function toMeta(raw: Record<string, unknown>): SessionMeta | undefined {
     title: typeof title === 'string' && title ? title : '(无标题)',
     pinned: raw['pinned'] === true,
     updatedAt: num(raw['updated_at']),
-    seqId: raw['seq_id'] === undefined || raw['seq_id'] === null ? undefined : num(raw['seq_id']),
+    seqId: optionalNum(raw['seq_id']),
   };
 }
 
@@ -56,13 +75,17 @@ export async function listSessions(
     const result = await transport.get<Record<string, unknown>>(path);
     const biz = result.data;
 
-    if (result.http !== 200 || result.code !== 0 || !biz) {
+    if (result.http !== 200 || result.code !== 0 || !isRecord(biz)) {
       throw new ApiFailure(result, `会话列表接口异常（http=${result.http}, code=${result.code}）`);
     }
+    if (result.bizCode !== undefined && result.bizCode !== 0) {
+      throw new ApiFailure(result, `会话列表业务码异常（biz_code=${result.bizCode}）`);
+    }
+    if (!Array.isArray(biz['chat_sessions']) || biz['chat_sessions'].some(item => !isRecord(item))) {
+      throw new Error('会话列表响应缺少有效 chat_sessions 数组；拒绝返回不完整列表');
+    }
 
-    const batch = Array.isArray(biz['chat_sessions'])
-      ? (biz['chat_sessions'] as Array<Record<string, unknown>>)
-      : [];
+    const batch = biz['chat_sessions'] as Array<Record<string, unknown>>;
 
     for (const item of batch) {
       const meta = toMeta(item);
@@ -72,26 +95,35 @@ export async function listSessions(
       }
     }
 
-    if (biz['has_more'] !== true || batch.length === 0) { completed = true; break; }
+    if (typeof biz['has_more'] !== 'boolean') {
+      throw new Error('会话分页响应缺少有效 has_more；拒绝返回不完整列表');
+    }
+    if (!biz['has_more']) {
+      completed = true;
+      break;
+    }
+    if (batch.length === 0) {
+      throw new Error('会话分页返回空页但 has_more=true；拒绝返回不完整列表');
+    }
 
     let candidate: number | undefined;
 
-    const nextCursor = biz['next_cursor'];
-    if (nextCursor !== undefined && nextCursor !== null) {
+    const nextCursor = cursorNum(biz['next_cursor'], 'next_cursor');
+    if (nextCursor !== undefined) {
       mode = 'seq';
-      candidate = num(nextCursor);
+      candidate = nextCursor;
     } else {
       const seqIds = batch
-        .map(item => num(item['seq_id'], Number.NaN))
-        .filter(value => Number.isFinite(value));
+        .map(item => cursorNum(item['seq_id'], 'seq_id'))
+        .filter((value): value is number => value !== undefined);
 
       if (seqIds.length > 0) {
         mode = 'seq';
         candidate = Math.min(...seqIds);
       } else {
         const times = batch
-          .map(item => num(item['updated_at'], Number.NaN))
-          .filter(value => Number.isFinite(value));
+          .map(item => cursorNum(item['updated_at'], 'updated_at'))
+          .filter((value): value is number => value !== undefined);
 
         if (times.length === 0) {
           throw new Error('分页响应声明 has_more=true，但缺少可用游标；拒绝返回不完整会话列表');
@@ -135,13 +167,22 @@ export async function getMessages(transport: Transport, sessionId: string): Prom
   const result = await transport.get<Record<string, unknown>>(path);
   const biz = result.data;
 
-  if (result.http !== 200 || result.code !== 0 || !biz) {
+  if (result.http !== 200 || result.code !== 0 || !isRecord(biz)) {
     throw new ApiFailure(result, `会话消息接口异常（http=${result.http}, code=${result.code}）`);
   }
+  if (result.bizCode !== undefined && result.bizCode !== 0) {
+    throw new ApiFailure(result, `会话消息业务码异常（biz_code=${result.bizCode}）`);
+  }
+  if (!Array.isArray(biz['chat_messages']) || biz['chat_messages'].some(message => !isRecord(message))) {
+    throw new Error('会话消息响应缺少有效 chat_messages 数组；拒绝生成空快照');
+  }
 
-  const messages = Array.isArray(biz['chat_messages'])
-    ? (biz['chat_messages'] as Array<Record<string, unknown>>)
-    : [];
+  const messages = biz['chat_messages'] as Array<Record<string, unknown>>;
+  for (const message of messages) {
+    if (!Array.isArray(message['fragments']) || message['fragments'].some(fragment => !isRecord(fragment))) {
+      throw new Error('会话消息 fragments 结构无效；拒绝生成不完整快照');
+    }
+  }
 
   return messages.map(toMessage);
 }

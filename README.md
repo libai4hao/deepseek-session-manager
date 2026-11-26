@@ -25,7 +25,7 @@
 | 归属校验 | ✅ | ✅ | 必须在本账号列表命中；未命中即拒绝，不盲删 |
 | 置顶保护 | ✅ 固定开启 | ✅ `--include-pinned` 可关 | 置顶会话默认跳过 |
 | 删除前快照 | ✅ 下载 JSON | ✅ `snapshots/` | 仅实际执行时生成；失败即中止删除 |
-| 快照加密 | — | ✅ `--snapshot-encrypt` | scrypt + AES-256-GCM；口令只从 `DSX_SNAPSHOT_PASSWORD` 读 |
+| 快照加密 | — | ✅ `--snapshot-encrypt` | scrypt + AES-256-GCM；口令只从 `DSX_SNAPSHOT_PASSWORD` 读，文件名不含标题 |
 | 仅导出（不删） | — | ✅ `--export-only` | 与 `--apply` 互斥；适合先备份后决定 |
 | 预演（dry-run） | ✅ 默认勾选 | ✅ 默认开启 | 不拉消息、不写快照、不调删除接口；只写报告与审计 |
 | 串行限速 | ✅ 500ms / 20 条 / 10s | ✅ 三个参数可配 | 不并发，宁可慢 |
@@ -33,7 +33,7 @@
 | 鉴权失效中止 | ✅ | ✅ | `401` / `code 40003` → 余下标 `ABORTED` |
 | 失败重试 | ✅ 2 次 | ✅ `--retries` | 5xx/429 退避 1/2/4s；403 冷却 30s |
 | 删后复核 | ✅ | ✅ | 重拉列表看是否仍在 |
-| 审计 | ✅ 本地存储 + 下载 | ✅ `audit.jsonl` | 脱敏，账号只存 sha256 前 8 字节 |
+| 审计 | ✅ 本地存储 + 下载 | ✅ `audit.jsonl` | 追加写、脱敏，账号只存 sha256 前 8 字节 |
 | 批量确认 | ✅ >5 条输入 `DELETE` | ✅ `--yes` | 单次硬上限 50 条 |
 | 断点续跑 | — | ✅ `--resume` | 读 `<out>/progress.json`：跳过已完成、复用已有快照；账号指纹不符直接中止 |
 | 持久安装 | ✅ 油猴 / MV3 壳 | — | 刷新不失效；MV3 产物在 `dist/extension/` |
@@ -44,7 +44,7 @@
 ```bash
 pnpm install
 pnpm build        # 产出 dist/dsx.user.js、dist/dsx-cli.mjs、dist/extension/
-pnpm test         # 58 个单测
+pnpm test         # 运行全部单测
 ```
 
 ### 三种安装方式
@@ -142,7 +142,7 @@ scripts/build.mjs  esbuild 构建 + MV3 打包（dist/extension/）
 
 ```bash
 pnpm typecheck    # tsc --noEmit
-pnpm test         # vitest run（58 例）
+pnpm test         # vitest run（全部单测）
 pnpm build        # esbuild + MV3 打包
 ```
 

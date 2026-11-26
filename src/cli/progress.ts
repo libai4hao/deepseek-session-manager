@@ -1,7 +1,9 @@
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 
+import { validateSnapshot } from '../core/snapshot';
 import type { ExecResult } from '../core/types';
+import { validateEncryptedSnapshot } from './snapshot-crypto';
 
 export type ProgressStatus = 'snapshotted' | 'deleted' | 'skipped' | 'failed' | 'aborted';
 
@@ -47,11 +49,11 @@ export function readProgress(path: string): Progress | undefined {
   }
 }
 
-/** Ids whose work is finished for good: deleted, or confirmed absent on the server. */
+/** Only a confirmed deletion is safe to skip on resume. */
 export function completedIds(progress?: Progress): Set<string> {
   const done = new Set<string>();
   for (const [id, entry] of Object.entries(progress?.entries ?? {})) {
-    if (entry.status === 'deleted' || entry.status === 'skipped') done.add(id);
+    if (entry.status === 'deleted') done.add(id);
   }
   return done;
 }
@@ -73,11 +75,10 @@ export function reusableSnapshots(
     const fullPath = join(snapshotDir, name);
     try {
       if (name.endsWith('.enc.json')) {
-        // Ciphertext cannot be verified without the password; require a non-empty body.
-        if (read(fullPath).length === 0) continue;
+        validateEncryptedSnapshot(JSON.parse(read(fullPath)));
       } else {
-        const parsed = JSON.parse(read(fullPath)) as { schema?: string; id?: string };
-        if (parsed.schema !== 'dsx.snapshot.v1' || parsed.id !== id) continue;
+        const snapshot = validateSnapshot(JSON.parse(read(fullPath)));
+        if (snapshot.id !== id) continue;
       }
     } catch {
       continue;
@@ -133,7 +134,11 @@ export function mergeResults(
 
   for (const result of results) {
     const status: ProgressStatus =
-      result.status === 'noop' ? 'deleted' : (result.status as ProgressStatus);
+      result.status === 'noop'
+        ? 'deleted'
+        : result.status === 'skipped' && result.reason === 'ABORTED'
+          ? 'aborted'
+          : (result.status as ProgressStatus);
 
     base.entries[result.id] = {
       status,
@@ -146,6 +151,19 @@ export function mergeResults(
 
   base.updatedAt = at;
   return base;
+}
+
+export function reconcileDeletedResults(
+  results: ExecResult[],
+  verify: Array<{ id: string; stillThere: boolean }> | undefined,
+): ExecResult[] {
+  return results.map(result => {
+    if (result.status !== 'deleted') return result;
+    const entry = verify?.find(item => item.id === result.id);
+    if (!entry) return { ...result, status: 'failed', reason: 'VERIFY_FAILED' };
+    if (entry.stillThere) return { ...result, status: 'failed', reason: 'VERIFY_STILL_THERE' };
+    return result;
+  });
 }
 
 export function writeProgress(path: string, progress: Progress): void {

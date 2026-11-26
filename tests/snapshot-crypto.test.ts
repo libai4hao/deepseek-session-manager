@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { decryptSnapshot, encryptedFileName, encryptSnapshot } from '../src/cli/snapshot-crypto';
+import { decryptSnapshot, encryptedFileName, encryptedSnapshotFileName, encryptSnapshot, validateEncryptedSnapshot } from '../src/cli/snapshot-crypto';
 import type { Snapshot } from '../src/core/snapshot';
 
 const snapshot: Snapshot = {
@@ -34,5 +34,20 @@ describe('snapshot encryption', () => {
 
   it('names encrypted files distinctly', () => {
     expect(encryptedFileName('20261122_t_7d76209a.json')).toBe('20261122_t_7d76209a.enc.json');
+  });
+
+  it('keeps titles out of encrypted filenames and uses the full session id', () => {
+    const name = encryptedSnapshotFileName({
+      id: 'abcdefgh-1111-2222-3333-444444444444',
+      title: '内部讨论：季度预算',
+      pinned: false,
+      updatedAt: snapshot.updatedAt,
+    });
+    expect(name).not.toContain('内部讨论');
+    expect(name).toContain('abcdefgh-1111-2222-3333-444444444444');
+  });
+
+  it('rejects arbitrary nonempty ciphertext as an envelope', () => {
+    expect(() => validateEncryptedSnapshot('ciphertext')).toThrow(/结构无效/);
   });
 });

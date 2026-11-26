@@ -19,22 +19,25 @@ export interface AuditEvent {
 }
 
 export function toAuditLine(event: AuditEvent): string {
-  return JSON.stringify(event);
+  return JSON.stringify({
+    ...event,
+    sourceLink: event.sourceLink ? redactSecrets(event.sourceLink) : undefined,
+    note: event.note ? redactSecrets(event.note) : undefined,
+  });
 }
 
 /** Defence in depth: nothing that looks like a credential leaves this process. */
 export function redactSecrets(text: string): string {
   return text
     .replace(/Bearer\s+[A-Za-z0-9._~+/-]+=*/gi, 'Bearer ***')
-    .replace(/(token|authorization|cookie)=([^&\s;]+)/gi, '$1=***');
+    .replace(/(["']?cookie["']?\s*[=:]\s*)(?!Bearer\s)(?:"[^"]*"|'[^']*'|[^&\r\n}]+)/gi, '$1***')
+    .replace(/(["']?(?:token|authorization)["']?\s*[=:]\s*)(?!Bearer\s)(?:"[^"]*"|'[^']*'|[^&\s;,}]+)/gi, '$1***')
+    .replace(/(https?:\/\/)[^/\s:@]+:[^/\s@]+@/gi, '$1***@');
 }
 
 export async function hashId(value: string): Promise<string> {
   const subtle = globalThis.crypto?.subtle;
-  if (!subtle) {
-    // Fallback for environments without WebCrypto: keep only a useless prefix.
-    return `plain:${value.slice(0, 2)}***`;
-  }
+  if (!subtle) throw new Error('当前环境缺少 WebCrypto，无法安全生成账号指纹');
 
   const digest = await subtle.digest('SHA-256', new TextEncoder().encode(value));
   const hex = Array.from(new Uint8Array(digest))

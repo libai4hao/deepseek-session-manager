@@ -8,7 +8,7 @@ import { runQueue } from '../core/executor';
 import { buildSnapshot } from '../core/snapshot';
 import { locateSession, sessionIdFromHref } from './sidebar';
 import type { ExecResult, ParsedLink, SessionMeta, Transport } from '../core/types';
-import { toAuditLine, type AuditEvent } from '../core/audit';
+import { execResultToAudit, toAuditLine, type AuditEvent } from '../core/audit';
 
 const HOST_ID = 'dsx-host';
 const AUDIT_KEY = 'dsx:audit:v1';
@@ -65,11 +65,19 @@ function makeTransport(token: string): Transport {
   return createFetchTransport({ headers: authHeaders(token), credentials: 'include' });
 }
 
+function readAuditLines(): string[] {
+  try {
+    const parsed: unknown = JSON.parse(localStorage.getItem(AUDIT_KEY) ?? '[]');
+    return Array.isArray(parsed) ? parsed.filter((line): line is string => typeof line === 'string') : [];
+  } catch {
+    return [];
+  }
+}
+
 function appendAudit(events: AuditEvent[]): void {
   if (events.length === 0) return;
   try {
-    const existing = JSON.parse(localStorage.getItem(AUDIT_KEY) ?? '[]') as string[];
-    const lines = existing.concat(events.map(toAuditLine)).slice(-AUDIT_CAP);
+    const lines = readAuditLines().concat(events.map(toAuditLine)).slice(-AUDIT_CAP);
     localStorage.setItem(AUDIT_KEY, JSON.stringify(lines));
   } catch {
     // audit is best-effort; never block the delete flow on storage errors
@@ -171,6 +179,7 @@ function mountPanel(): void {
   const auditBtn = shadow.querySelector<HTMLButtonElement>('#audit')!;
   const fillBtn = shadow.querySelector<HTMLButtonElement>('#fill')!;
   const locateBtn = shadow.querySelector<HTMLButtonElement>('#locate')!;
+  let deleting = false;
 
   const setHint = (text: string): void => {
     hint.textContent = text;
@@ -210,12 +219,12 @@ function mountPanel(): void {
   });
 
   auditBtn.addEventListener('click', () => {
-    const lines = localStorage.getItem(AUDIT_KEY);
-    if (!lines || lines === '[]') {
-      setHint('暂无审计记录');
+    const auditLines = readAuditLines();
+    if (auditLines.length === 0) {
+      setHint('暂无有效审计记录');
       return;
     }
-    download(`dsx-audit-${stamp()}.jsonl`, (JSON.parse(lines) as string[]).join('\n') + '\n', 'application/x-ndjson');
+    download(`dsx-audit-${stamp()}.jsonl`, auditLines.join('\n') + '\n', 'application/x-ndjson');
     setHint('审计已下载');
   });
 
@@ -322,6 +331,7 @@ function mountPanel(): void {
   previewBtn.addEventListener('click', () => void refresh());
 
   applyBtn.addEventListener('click', () => {
+    if (deleting) return;
     void (async () => {
       const targets = state.rows.filter(row => row.status === 'ok' && row.id);
       if (targets.length === 0) {
@@ -350,89 +360,82 @@ function mountPanel(): void {
         return;
       }
 
-      // Re-fetch the account's live session list immediately before any snapshot/delete.
-      let freshSessions: SessionMeta[];
-      try {
-        freshSessions = await listSessions(makeTransport(token));
-      } catch (error) {
-        setHint(`删除前重新校验失败，已中止：${(error as Error).message}`);
-        return;
-      }
-      const freshIndex = buildIndex(freshSessions);
-      for (const target of targets) {
-        const link = parseLinks([target.link])[0];
-        const outcome = link ? guardLink(link, freshIndex, { protectPinned: true }) : undefined;
-        if (!outcome?.ok || !outcome.meta || outcome.meta.id !== target.id || outcome.meta.pinned) {
-          setHint(`删除前校验失败：${target.id?.slice(0, 8) ?? '目标'} 已不存在、归属变化或已置顶；请重新预览`);
-          return;
-        }
-      }
-      state.sessions = freshSessions;
-      state.index = freshIndex;
-
+      deleting = true;
       applyBtn.disabled = true;
       previewBtn.disabled = true;
 
-      const audit: AuditEvent[] = [];
-      let auditFlushed = false;
-
       try {
-        setHint('生成快照…');
-        const transport = makeTransport(token);
-        const snapshots = [];
-
-        for (const row of targets) {
-          const meta = state.index.get(row.id!);
-          // A target that vanished from the fresh list must abort the whole run, not slip through.
-          if (!meta) throw new Error(`${row.id?.slice(0, 8) ?? '目标'} 已不在最新会话列表中`);
-          const messages = await getMessages(transport, meta.id);
-          snapshots.push(buildSnapshot(meta, messages));
+        let freshSessions: SessionMeta[];
+        try {
+          freshSessions = await listSessions(makeTransport(token));
+        } catch (error) {
+          setHint(`删除前重新校验失败，已中止：${(error as Error).message}`);
+          return;
         }
-        download(`dsx-snapshots-${stamp()}.json`, JSON.stringify(snapshots, null, 2));
+        const freshIndex = buildIndex(freshSessions);
+        for (const target of targets) {
+          const link = parseLinks([target.link])[0];
+          const outcome = link ? guardLink(link, freshIndex, { protectPinned: true }) : undefined;
+          if (!outcome?.ok || !outcome.meta || outcome.meta.id !== target.id || outcome.meta.pinned) {
+            setHint(`删除前校验失败：${target.id?.slice(0, 8) ?? '目标'} 已不存在、归属变化或已置顶；请重新预览`);
+            return;
+          }
+        }
+        state.sessions = freshSessions;
+        state.index = freshIndex;
 
-        const ids = targets.map(row => row.id as string);
-
-        setHint('开始删除…');
-        const results = await runQueue(
-          transport,
-          ids,
-          { intervalMs: 500, batchSize: 20, batchPauseMs: 10_000, retries: 2, shape: 'auto' },
-          {
-            onStart: (id, position, total) => setHint(`[${position + 1}/${total}] ${id.slice(0, 8)} …`),
-            onResult: result => {
-              const row = state.rows.find(item => item.id === result.id);
-              if (row) row.result = result;
-              audit.push({
-                ts: new Date().toISOString(),
-                event: 'delete',
-                sessionId: result.id,
-                status: result.status,
-                attempts: result.attempts,
-                ms: result.ms,
-                note: result.reason,
-              });
-              renderRows();
-            },
-          },
-        );
-
-        appendAudit(audit);
-        auditFlushed = true;
+        const audit: AuditEvent[] = [];
+        let auditFlushed = false;
 
         try {
-          const verify = await verifyDeleted(transport, ids);
-          const still = verify.filter(entry => entry.stillThere).length;
-          state.sessions = await listSessions(transport);
-          state.index = buildIndex(state.sessions);
-          setHint(`完成：删除 ${results.filter(r => r.status === 'deleted').length} 条，仍在列表 ${still} 条`);
-        } catch {
-          setHint(`完成：删除 ${results.filter(r => r.status === 'deleted').length} 条（复核失败）`);
+          setHint('生成快照…');
+          const transport = makeTransport(token);
+          const snapshots = [];
+
+          for (const row of targets) {
+            const meta = state.index.get(row.id!);
+            if (!meta) throw new Error(`${row.id?.slice(0, 8) ?? '目标'} 已不在最新会话列表中`);
+            const messages = await getMessages(transport, meta.id);
+            snapshots.push(buildSnapshot(meta, messages));
+          }
+          download(`dsx-snapshots-${stamp()}.json`, JSON.stringify(snapshots, null, 2));
+
+          const ids = targets.map(row => row.id as string);
+
+          setHint('开始删除…');
+          const results = await runQueue(
+            transport,
+            ids,
+            { intervalMs: 500, batchSize: 20, batchPauseMs: 10_000, retries: 2, shape: 'auto' },
+            {
+              onStart: (id, position, total) => setHint(`[${position + 1}/${total}] ${id.slice(0, 8)} …`),
+              onResult: result => {
+                const row = state.rows.find(item => item.id === result.id);
+                if (row) row.result = result;
+                audit.push(execResultToAudit(result));
+                renderRows();
+              },
+            },
+          );
+
+          appendAudit(audit);
+          auditFlushed = true;
+
+          try {
+            const verify = await verifyDeleted(transport, ids);
+            const still = verify.filter(entry => entry.stillThere).length;
+            state.sessions = await listSessions(transport);
+            state.index = buildIndex(state.sessions);
+            setHint(`完成：删除 ${results.filter(r => r.status === 'deleted').length} 条，仍在列表 ${still} 条`);
+          } catch {
+            setHint(`完成：删除 ${results.filter(r => r.status === 'deleted').length} 条（复核失败）`);
+          }
+        } catch (error) {
+          if (!auditFlushed && audit.length > 0) appendAudit(audit);
+          setHint(`执行异常中止：${(error as Error).message}`);
         }
-      } catch (error) {
-        if (!auditFlushed && audit.length > 0) appendAudit(audit);
-        setHint(`执行异常中止：${(error as Error).message}`);
       } finally {
-        // Re-arm the preflight switch: the next run must be an explicit opt-in again.
+        deleting = false;
         dryBox.checked = true;
         applyBtn.disabled = false;
         previewBtn.disabled = false;

@@ -67,11 +67,14 @@ node --check dist\dsx-cli.mjs
 node --check dist\extension\dsx.js
 
 # 5) manifest 真的被 Chrome 接受（最有效的一项）
-& "C:\Program Files\Google\Chrome\Application\chrome.exe" --pack-extension="$PWD\dist\extension"
-# 成功会在 dist 同级生成 extension.crx；失败会弹错误对话框
+# 在 dist 之外签名，避免 extension.pem / extension.crx 混入 npm 包。
+New-Item -ItemType Directory -Force .dsx-signing\extension | Out-Null
+Copy-Item dist\extension\* .dsx-signing\extension\
+& "C:\Program Files\Google\Chrome\Application\chrome.exe" --pack-extension="$PWD\.dsx-signing\extension"
+# 成功会在 .dsx-signing 同级生成 extension.crx 和 extension.pem；失败会弹错误对话框
 ```
 
-`extension.pem` 是签名私钥：**不入库、不外传、不丢**。丢了就只能换新扩展 ID。
+`extension.pem` 是签名私钥：**不入库、不外传、不丢**。丢了就只能换新扩展 ID。`.dsx-signing/` 已加入 `.gitignore`，且 npm 发布使用精确文件白名单，不会包含签名产物。
 
 ## 五、打三个包
 
@@ -108,7 +111,7 @@ gh release create v0.2.2 `
   dist/dsx-cli.mjs `
   dist/dsx-0.2.2-mv3.zip `
   --title "DSX v0.2.2" `
-  --notes "油猴/MV3/CLI 三形态；新增 --export-only、--resume、快照加密（scrypt + AES-256-GCM）、progress.json 账本。44 例单测通过。"
+  --notes "油猴/MV3/CLI 三形态；新增 --export-only、--resume、快照加密（scrypt + AES-256-GCM）、progress.json 账本。全部单测通过。"
 ```
 
 要点：
@@ -147,13 +150,12 @@ gh release view v0.2.2
 ## 七、发 npm（可选）
 
 ```powershell
-pnpm build
-npm pack --dry-run     # 先看清单：dist/docs/README/LICENSE，约 12 个文件
+npm pack --dry-run     # prepack 会自动构建；只允许精确列出的 dist 文件
 npm publish --access public
 ```
 
 - 包名 `deepseek-session-manager`，`bin` 为 `dsx → dist/dsx-cli.mjs`；
-- 发布前确认 tgz 里 `dist/` 存在（`files` 字段包含 `dist`，但 dist 不入库，必须先 build）；
+- `files` 只包含 `dist/dsx-cli.mjs`、`dist/dsx.user.js` 和 MV3 的两个源文件；`prepack` 会自动构建，旧 zip、`*.pem`、`*.crx` 不会入包；
 - 撤销窗口只有 24 小时：`npm unpublish deepseek-session-manager@0.2.2`。
 
 ## 八、发布后验收（四项，缺一不可）
@@ -291,5 +293,5 @@ Greasy Fork 用自己的脚本页作为分发入口，安装后由站点上的�
 | 油猴装完版本仍旧 | Tampermonkey 缓存了旧版 | 脚本管理页点“检查更新”，或删掉重装 |
 | 扩展加载报 manifest 错 | zip 里多套了一层目录 | 重打：`Compress-Archive dist\extension\*`，保持根目录 |
 | 扩展 ID 变了 | 换了 pem 或没带 pem 打包 | 用同一把 pem；或接受新 ID 并重新授权站点 |
-| `npm pack` 里没有 dist | 忘了 build | 先 `pnpm build`，再 `npm pack --dry-run` 确认 |
+| `npm pack` 里没有 dist | prepack 未执行或构建失败 | 直接运行 `npm pack --dry-run`，确认自动构建成功且清单只含白名单文件 |
 | 发布后 CLI 跑不起来 | 目标机 Node < 18 | 文档已标 `engines`，必要时提示升级 |

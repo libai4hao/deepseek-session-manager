@@ -1,3 +1,4 @@
+import { redactSecrets } from './audit';
 import type { ParsedLink } from './types';
 
 const HOST = 'chat.deepseek.com';
@@ -34,6 +35,22 @@ export function parseLink(raw: string, base = `https://${HOST}`): ParsedLink {
   if (!matched) return { raw, kind: 'bad', reason: `不认识的路径：${url.pathname}` };
 
   return { raw, kind: 'session', id: matched[1].toLowerCase() };
+}
+
+export function sanitizeLinkForReport(link: ParsedLink): string {
+  if (link.kind === 'session' && link.id) return `https://${HOST}/a/chat/s/${link.id}`;
+
+  const redacted = redactSecrets(link.raw);
+  try {
+    const url = new URL(redacted);
+    url.username = '';
+    url.password = '';
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return redacted;
+  }
 }
 
 export function parseLinks(lines: string[], base?: string): ParsedLink[] {
