@@ -128,6 +128,19 @@ describe('resume bookkeeping', () => {
     expect(verified.entries.b.verifiedAt).toBeUndefined();
   });
 
+  it('keeps a live flush resumable only after the list is re-checked', () => {
+    const deleted = { id: 'a', status: 'deleted' as const, attempts: 1, ms: 1 };
+
+    const live = mergeResults(undefined, [deleted], new Map(), new Date('2026-01-01T00:00:00.000Z'), false);
+    expect(live.entries.a.status).toBe('deleted');
+    expect(live.entries.a.verifiedAt).toBeUndefined();
+    expect(completedIds(live)).toEqual(new Set());
+
+    const verified = mergeResults(live, [deleted], new Map(), new Date('2026-01-02T00:00:00.000Z'), true);
+    expect(verified.entries.a.verifiedAt).toBe('2026-01-02T00:00:00.000Z');
+    expect(completedIds(verified)).toEqual(new Set(['a']));
+  });
+
   it('does not trust an unverified noop and maps ABORTED skips to aborted', () => {
     const next = mergeResults(undefined, [
       { id: 'a', status: 'noop', attempts: 1, ms: 10 },

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { snapshotFileName, snapshotMatchesMeta, validateSnapshot } from '../src/core/snapshot';
+import { assertUsableBackups, buildSnapshot, snapshotFileName, snapshotMatchesMeta, validateSnapshot } from '../src/core/snapshot';
 
 describe('snapshot files', () => {
   it('does not collide when two session ids share the same prefix', () => {
@@ -47,5 +47,27 @@ describe('snapshot files', () => {
       messageCount: 0,
       messages: [],
     }).id).toBe('a');
+  });
+
+  it('keeps the title out of the file name when masking', () => {
+    const meta = { id: 'abcdefgh', title: 'Confidential Q3 plan', pinned: false, updatedAt: 1_700_000_000 };
+    const masked = snapshotFileName(meta, { maskTitle: true });
+
+    expect(masked).not.toContain('Confidential');
+    expect(masked).toContain('_session_');
+    expect(snapshotFileName({ ...meta, id: 'abcdefff' }, { maskTitle: true })).not.toBe(masked);
+  });
+
+  it('refuses to treat an empty capture as a usable backup before deleting', () => {
+    const meta = { id: 'a', title: 'empty', pinned: false, updatedAt: 1 };
+
+    expect(() => assertUsableBackups([buildSnapshot(meta, [])])).toThrow(/快照为空/);
+    expect(() =>
+      assertUsableBackups([
+        buildSnapshot(meta, [
+          { messageId: 1, role: 'user', insertedAt: 1, fragments: [{ type: 'text', content: 'hi' }] },
+        ]),
+      ]),
+    ).not.toThrow();
   });
 });

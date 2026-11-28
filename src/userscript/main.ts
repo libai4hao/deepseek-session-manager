@@ -5,7 +5,8 @@ import { dedupeLinks, parseLinks, splitLines } from '../core/parser';
 import { buildIndex, guardLink } from '../core/guard';
 import { getMessages, listSessions, verifyDeleted } from '../core/repository';
 import { reconcileDeletedResults, runQueue } from '../core/executor';
-import { buildSnapshot, type Snapshot } from '../core/snapshot';
+import { buildSnapshot, assertUsableBackups, type Snapshot } from '../core/snapshot';
+import { HARD_BATCH_LIMIT, exceedsBatchLimit } from '../core/batch';
 import { locateSession, sessionIdFromHref } from './sidebar';
 import type { ExecResult, ParsedLink, SessionMeta, Transport } from '../core/types';
 import { execResultToAudit, toAuditLine, type AuditEvent } from '../core/audit';
@@ -343,6 +344,11 @@ function mountPanel(): void {
         return;
       }
 
+      if (exceedsBatchLimit(targets.length)) {
+        setHint(`待删除 ${targets.length} 条，超过单次上限 ${HARD_BATCH_LIMIT}，请拆分后重试`);
+        return;
+      }
+
       const confirmed =
         targets.length > 5
           ? prompt(`将删除 ${targets.length} 条会话，不可恢复。输入 DELETE 确认：`) === 'DELETE'
@@ -384,9 +390,6 @@ function mountPanel(): void {
         state.sessions = freshSessions;
         state.index = freshIndex;
 
-        const audit: AuditEvent[] = [];
-        let auditFlushed = false;
-
         try {
           setHint('生成快照…');
           const transport = makeTransport(token);
@@ -398,6 +401,7 @@ function mountPanel(): void {
             const messages = await getMessages(transport, meta.id);
             snapshots.push(buildSnapshot(meta, messages));
           }
+          assertUsableBackups(snapshots);
           download(`dsx-snapshots-${stamp()}.json`, JSON.stringify(snapshots, null, 2));
           if (prompt('已触发快照下载。请确认文件已成功保存后输入 SAVED；未保存或下载失败请输入其他内容取消：') !== 'SAVED') {
             setHint('未确认快照保存成功，已取消删除');
@@ -429,14 +433,12 @@ function mountPanel(): void {
               onResult: result => {
                 const row = state.rows.find(item => item.id === result.id);
                 if (row) row.result = result;
-                audit.push(execResultToAudit(result));
+                // Flush per item: closing the tab mid-run must not erase what was deleted.
+                appendAudit([execResultToAudit(result)]);
                 renderRows();
               },
             },
           );
-
-          appendAudit(audit);
-          auditFlushed = true;
 
           const applyVerification = (verify: Array<{ id: string; stillThere: boolean }> | undefined): ExecResult[] => {
             const reconciled = reconcileDeletedResults(results, verify);
@@ -471,7 +473,6 @@ function mountPanel(): void {
           }
           setHint(`完成：已验证删除 ${reconciled.filter(r => r.status === 'deleted').length} 条，仍在列表 ${still} 条${verify ? '' : '（复核失败）'}`);
         } catch (error) {
-          if (!auditFlushed && audit.length > 0) appendAudit(audit);
           setHint(`执行异常中止：${(error as Error).message}`);
         }
       } finally {

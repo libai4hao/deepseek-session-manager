@@ -63,6 +63,19 @@ export function snapshotMatchesMeta(snapshot: Snapshot, meta: SessionMeta): bool
   return snapshot.id === meta.id && snapshot.updatedAt === meta.updatedAt;
 }
 
+/**
+ * A snapshot is the only way back from an irreversible delete, so an empty capture
+ * (zero fragments) cannot stand in for one: it is indistinguishable from no backup.
+ * Callers that capture before deleting must fail closed instead of deleting on top of it.
+ */
+export function assertUsableBackups(snapshots: Snapshot[]): void {
+  const empty = snapshots.filter(snapshot => snapshot.messageCount === 0).map(snapshot => snapshot.id);
+  if (empty.length > 0) {
+    const sample = empty.slice(0, 3).join(', ');
+    throw new Error(`快照为空（${empty.length} 条：${sample}）：拒绝在没有备份的情况下删除`);
+  }
+}
+
 export function buildSnapshot(
   meta: SessionMeta,
   messages: ChatMessage[],
@@ -90,13 +103,14 @@ export function buildSnapshot(
   };
 }
 
-export function snapshotFileName(meta: SessionMeta): string {
-  const slug =
-    meta.title
-      .replace(/[\\/:*?"<>|\s]+/g, '_')
-      .replace(/_+/g, '_')
-      .replace(/^_|_$/g, '')
-      .slice(0, 40) || 'untitled';
+export function snapshotFileName(meta: SessionMeta, options: { maskTitle?: boolean } = {}): string {
+  const slug = options.maskTitle
+    ? 'session'
+    : meta.title
+        .replace(/[\\/:*?"<>|\s]+/g, '_')
+        .replace(/_+/g, '_')
+        .replace(/^_|_$/g, '')
+        .slice(0, 40) || 'untitled';
 
   const safeId = snapshotIdForFileName(meta.id);
   const date = new Date(meta.updatedAt * 1000).toISOString().slice(0, 10).replace(/-/g, '');

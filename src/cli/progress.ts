@@ -133,6 +133,12 @@ export function mergeResults(
   results: ExecResult[],
   idToSnapshot: Map<string, string> = new Map(),
   now: Date = new Date(),
+  /**
+   * Only a reconciled result (re-listed and confirmed gone) may be recorded as verified.
+   * A live flush after each POST passes `false`, so a crash before the verify step
+   * cannot leave a resumable "already deleted" verdict behind.
+   */
+  verified = true,
 ): Progress {
   const base = progress ?? emptyProgress();
   const at = now.toISOString();
@@ -151,7 +157,8 @@ export function mergeResults(
       attempts: result.attempts,
       ms: result.ms,
       snapshot: idToSnapshot.get(result.id) ?? base.entries[result.id]?.snapshot,
-      verifiedAt: status === 'deleted' ? at : undefined,
+      verifiedAt:
+        status === 'deleted' ? (verified ? at : base.entries[result.id]?.verifiedAt) : undefined,
     };
   }
 

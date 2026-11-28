@@ -7,18 +7,18 @@ import { dedupeLinks, parseLinks, sanitizeLinkForReport, splitLines } from '../c
 import { buildIndex, guardLink } from '../core/guard';
 import { getAccountId, getMessages, listSessions, verifyDeleted } from '../core/repository';
 import { runQueue } from '../core/executor';
-import { buildSnapshot, snapshotFileName, snapshotMatchesMeta, validateSnapshot } from '../core/snapshot';
+import { buildSnapshot, snapshotFileName, snapshotMatchesMeta, validateSnapshot, assertUsableBackups } from '../core/snapshot';
 import { decryptSnapshot, encryptSnapshot, encryptedSnapshotFileName, validateEncryptedSnapshot } from './snapshot-crypto';
 import { execResultToAudit, hashId, toAuditLine, type AuditEvent } from '../core/audit';
 import type { ExecResult, SessionMeta } from '../core/types';
 import { parseArgs, USAGE, type CliArgs } from './args';
 import { checkResumeAccount, completedIds, markSnapshots, mergeResults, progressPath, readProgress, reconcileDeletedResults, reusableSnapshots, writeProgress } from './progress';
+import { HARD_BATCH_LIMIT, exceedsBatchLimit } from '../core/batch';
 import { readStorageState, type AccountState } from './state';
 import { renderMarkdown, resolveExitCode, type PlanItem, type Report, type ReportMode } from './report';
 import { ensureWebCrypto } from './runtime';
 
 const BASE_URL = 'https://chat.deepseek.com';
-const HARD_BATCH_LIMIT = 50;
 const CONFIRM_THRESHOLD = 5;
 
 function loadState(args: CliArgs): AccountState {
@@ -236,7 +236,7 @@ async function main(): Promise<number> {
 
   if (resumeSkipped > 0) console.log(`断点续跑：跳过 ${resumeSkipped} 条已完成项`);
 
-  if (writing && ids.length > HARD_BATCH_LIMIT) {
+  if (writing && exceedsBatchLimit(ids.length)) {
     console.error(`\n待处理 ${ids.length} 条，超过单次上限 ${HARD_BATCH_LIMIT}，请拆分成多次执行。`);
     return 2;
   }
@@ -256,17 +256,38 @@ async function main(): Promise<number> {
 
   mkdirSync(outDir, { recursive: true });
 
+  // Audit and progress are flushed per item from here on: a crash or a killed terminal
+  // must not erase the record of deletions that already happened.
+  const auditPath = join(outDir, 'audit.jsonl');
+  const appendAudit = (events: AuditEvent[]): void => {
+    if (events.length === 0) return;
+    appendFileSync(auditPath, events.map(toAuditLine).join('\n') + '\n', 'utf8');
+  };
+
+  let progress = storedProgress;
+  const persistProgress = (): void => {
+    if (!progress) return;
+    if (accountHash && !progress.accountHash) progress.accountHash = accountHash;
+    writeProgress(progressFile, progress);
+  };
+  const recordSnapshots = (idToFile: Map<string, string>): void => {
+    progress = markSnapshots(progress, idToFile);
+    persistProgress();
+  };
+
   const now = new Date().toISOString();
-  const auditEvents: AuditEvent[] = deletable.map(item => ({
-    ts: now,
-    event: 'plan',
-    sessionId: item.id,
-    title: item.title,
-    updatedAt: item.updatedAt,
-    sourceLink: item.link,
-    accountHash,
-    status: 'planned',
-  }));
+  appendAudit(
+    deletable.map(item => ({
+      ts: now,
+      event: 'plan',
+      sessionId: item.id,
+      title: item.title,
+      updatedAt: item.updatedAt,
+      sourceLink: item.link,
+      accountHash,
+      status: 'planned',
+    })),
+  );
 
   const snapshotFiles = new Map<string, string>();
   const exportFailures = new Set<string>();
@@ -289,7 +310,14 @@ async function main(): Promise<number> {
           ? reused.endsWith('.enc.json')
           : !reused.endsWith('.enc.json')
         : false;
-      if (reused && encryptionMatches) {
+      // `--mask-title` must not resurrect a snapshot file whose name still carries the title.
+      const expectedName = !reused
+        ? undefined
+        : reused.endsWith('.enc.json')
+          ? encryptedSnapshotFileName(meta)
+          : snapshotFileName(meta, { maskTitle: args.maskTitle });
+      const titleMatches = !args.maskTitle || !expectedName || reused === expectedName;
+      if (reused && encryptionMatches && titleMatches) {
         try {
           if (snapshotPassword) {
             const envelope = validateEncryptedSnapshot(JSON.parse(readFileSync(join(snapshotDir, reused), 'utf8')));
@@ -297,6 +325,7 @@ async function main(): Promise<number> {
             if (!snapshotMatchesMeta(snapshot, meta)) throw new Error('快照不是当前会话版本');
           }
           snapshotFiles.set(id, reused);
+          recordSnapshots(new Map([[id, reused]]));
           console.log(`[snapshot] 复用 ${reused}`);
           continue;
         } catch (error) {
@@ -307,13 +336,14 @@ async function main(): Promise<number> {
       try {
         const messages = await getMessages(transport, id);
         const snapshot = buildSnapshot(meta, messages);
-        const fileName = snapshotPassword ? encryptedSnapshotFileName(meta) : snapshotFileName(meta);
+        const fileName = snapshotPassword ? encryptedSnapshotFileName(meta) : snapshotFileName(meta, { maskTitle: args.maskTitle });
         const body = snapshotPassword
           ? JSON.stringify(encryptSnapshot(snapshot, snapshotPassword), null, 2)
           : JSON.stringify(snapshot, null, 2);
 
         writeFileSync(join(snapshotDir, fileName), body, 'utf8');
         snapshotFiles.set(id, fileName);
+        recordSnapshots(new Map([[id, fileName]]));
         console.log(`[snapshot] ${fileName}（${snapshot.messageCount} 段${snapshotPassword ? '，已加密' : ''}）`);
       } catch (error) {
         console.error(`[snapshot] ${id} 快照失败：${String(error)}`);
@@ -348,6 +378,7 @@ async function main(): Promise<number> {
           ? validateSnapshot(decryptSnapshot(validateEncryptedSnapshot(JSON.parse(readFileSync(join(outDir, 'snapshots', snapshotName), 'utf8'))), snapshotPassword!))
           : validateSnapshot(JSON.parse(readFileSync(join(outDir, 'snapshots', snapshotName), 'utf8'))));
       }
+      if (args.snapshot) assertUsableBackups([...savedSnapshots.values()]);
     } catch (error) {
       console.error(`删除前快照校验失败，已中止：${error instanceof Error ? error.message : String(error)}`);
       return 3;
@@ -382,13 +413,17 @@ async function main(): Promise<number> {
         },
         onResult: result => {
           console.log(result.status + (result.reason ? ` (${result.reason})` : ''));
-          auditEvents.push(
+          appendAudit([
             execResultToAudit(result, {
               accountHash,
               sourceLink: deletable.find(item => item.id === result.id)?.link,
               snapshot: snapshotFiles.get(result.id),
             }),
-          );
+          ]);
+          // Live flush: deletion is recorded but not yet verified, so a crash here
+          // cannot produce a resumable "completed" entry.
+          progress = mergeResults(progress, [result], snapshotFiles, new Date(), false);
+          persistProgress();
         },
         onShapeDetected: shape => console.log(`[dsx] 删除参数形态探测为 ${shape}`),
       },
@@ -400,16 +435,16 @@ async function main(): Promise<number> {
   if (mode === 'delete' && ids.length > 0) {
     try {
       verify = await verifyDeleted(transport, ids);
-      for (const entry of verify) {
-        auditEvents.push({
+      appendAudit(
+        verify.map(entry => ({
           ts: new Date().toISOString(),
-          event: 'verify',
+          event: 'verify' as const,
           sessionId: entry.id,
           accountHash,
-          status: entry.stillThere ? 'failed' : 'deleted',
+          status: entry.stillThere ? ('failed' as const) : ('deleted' as const),
           note: entry.stillThere ? '删除后仍在列表中' : '已从列表消失',
-        });
-      }
+        })),
+      );
     } catch (error) {
       verifyFailed = true;
       console.error(`[verify] 复核失败：${String(error)}`);
@@ -418,29 +453,29 @@ async function main(): Promise<number> {
 
   if (mode === 'delete') {
     const reconciled = reconcileDeletedResults(results, verify);
+    const corrections: AuditEvent[] = [];
     for (let index = 0; index < results.length; index += 1) {
       if (results[index].status === reconciled[index].status) continue;
-      auditEvents.push(execResultToAudit(reconciled[index], {
+      corrections.push(execResultToAudit(reconciled[index], {
         accountHash,
         sourceLink: deletable.find(item => item.id === reconciled[index].id)?.link,
         snapshot: snapshotFiles.get(reconciled[index].id),
       }));
     }
+    appendAudit(corrections);
     results = reconciled;
+    if (writing) {
+      progress = mergeResults(progress, reconciled, snapshotFiles, new Date(), true);
+      persistProgress();
+    }
   }
 
   const failed = results.filter(result => result.status === 'failed' || result.status === 'aborted');
   const stillThere = verify?.filter(entry => entry.stillThere) ?? [];
 
-  if (writing) {
-    let progress = storedProgress;
-    if (snapshotFiles.size > 0) progress = markSnapshots(progress, snapshotFiles);
-    if (results.length > 0) progress = mergeResults(progress, results, snapshotFiles);
-    if (progress) {
-      if (accountHash && !progress.accountHash) progress.accountHash = accountHash;
-      writeProgress(progressFile, progress);
-    }
-  }
+  // Everything above is already flushed item by item; this only closes the loop for
+  // export-only runs and makes the last state on disk authoritative.
+  persistProgress();
 
   const report: Report = {
     schema: 'dsx.report.v1',
@@ -467,8 +502,6 @@ async function main(): Promise<number> {
 
   writeFileSync(join(outDir, 'report.json'), JSON.stringify(report, null, 2), 'utf8');
   writeFileSync(join(outDir, 'report.md'), renderMarkdown(report), 'utf8');
-  const auditBody = auditEvents.map(toAuditLine).join('\n');
-  if (auditBody) appendFileSync(join(outDir, 'audit.jsonl'), auditBody + '\n', 'utf8');
 
   if (mode === 'export') {
     console.log(`\n汇总：导出 ${snapshotFiles.size} 条，失败 ${exportFailures.size} 条；未删除任何会话。`);
