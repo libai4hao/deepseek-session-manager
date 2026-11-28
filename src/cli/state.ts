@@ -23,6 +23,8 @@ interface StorageStateFile {
   origins?: StateOrigin[];
 }
 
+const CHAT_HOST = 'chat.deepseek.com';
+
 /**
  * Playwright's storageState carries both halves of the web session:
  * cookies (session identity) and localStorage.userToken (bearer token).
@@ -45,34 +47,32 @@ function findToken(state: StorageStateFile): string | undefined {
   const origins = state.origins ?? [];
 
   for (const origin of origins) {
-    const host = safeHost(origin.origin);
-    if (!isDeepSeekHost(host)) continue;
+    if (safeHost(origin.origin) !== CHAT_HOST) continue;
     const entry = (origin.localStorage ?? []).find(item => item.name === 'userToken');
     const token = tokenFromUserToken(entry?.value);
     if (token) return token;
   }
 
-
-
   return undefined;
 }
 
+/**
+ * Forward only what a browser would already attach to a chat.deepseek.com request:
+ * the parent-domain cookie and cookies set on the chat host itself. Host-only cookies
+ * from sibling subdomains (api./platform./share.) never belong on this request.
+ */
 function buildCookieHeader(state: StorageStateFile): string {
   const cookies = (state.cookies ?? []).filter(cookie => {
     const domain = (cookie.domain ?? '').toLowerCase();
-    return Boolean(cookie.name && cookie.value) && isDeepSeekCookieDomain(domain);
+    return Boolean(cookie.name && cookie.value) && isChatScopedCookieDomain(domain);
   });
 
   return cookies.map(cookie => `${cookie.name}=${cookie.value}`).join('; ');
 }
 
-function isDeepSeekHost(host: string): boolean {
-  return host === 'deepseek.com' || host.endsWith('.deepseek.com');
-}
-
-function isDeepSeekCookieDomain(domain: string): boolean {
-  const normalized = domain.replace(/^\./, '');
-  return normalized === 'deepseek.com' || normalized.endsWith('.deepseek.com');
+function isChatScopedCookieDomain(domain: string): boolean {
+  if (domain === '.deepseek.com') return true;
+  return domain.replace(/^\./, '') === CHAT_HOST;
 }
 
 function safeHost(origin?: string): string {

@@ -63,6 +63,28 @@ describe('readStorageState', () => {
     expect(state.cookieHeader).toBeUndefined();
   });
 
+  it('forwards only cookies a browser would send to chat.deepseek.com', () => {
+    const file = writeState({
+      cookies: [
+        { name: 'parent', value: 'p', domain: '.deepseek.com' },
+        { name: 'host', value: 'h', domain: 'chat.deepseek.com' },
+        { name: 'api_only', value: 'a', domain: 'api.deepseek.com' },
+        { name: 'platform_only', value: 's', domain: 'platform.deepseek.com' },
+        { name: 'apex_only', value: 'x', domain: 'deepseek.com' },
+        { name: 'other', value: 'o', domain: '.example.com' },
+      ],
+      origins: [
+        { origin: 'https://platform.deepseek.com', localStorage: [{ name: 'userToken', value: '"platform-token"' }] },
+        { origin: 'https://chat.deepseek.com', localStorage: [{ name: 'userToken', value: '"chat-token"' }] },
+      ],
+    });
+
+    const state = readStorageState(file);
+
+    expect(state.token).toBe('chat-token');
+    expect(state.cookieHeader).toBe('parent=p; host=h');
+  });
+
   it('returns no token when the state has none', () => {
     const file = writeState({ cookies: [], origins: [] });
     expect(readStorageState(file).token).toBeUndefined();
