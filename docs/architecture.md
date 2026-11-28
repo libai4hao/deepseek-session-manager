@@ -37,7 +37,7 @@
 | `src/core/snapshot.ts` | 删除前快照与文件命名 | `buildSnapshot`、`snapshotFileName` |
 | `src/core/audit.ts` | 审计事件、脱敏、id 哈希 | `toAuditLine`、`hashId`、`execResultToAudit` |
 | `src/core/auth.ts` | 从 `localStorage.userToken` 取 token | `tokenFromUserToken` |
-| `src/cli/state.ts` | 解析 Playwright storageState | `readStorageState` |
+| `src/cli/state.ts` | 解析 Playwright storageState（只取 `chat.deepseek.com` 的 `userToken`，Cookie 只带浏览器在 chat 站点本来就会发的那些） | `readStorageState` |
 | `src/cli/snapshot-crypto.ts` | 快照加密/解密（Node `crypto`，仅 CLI） | `encryptSnapshot`、`decryptSnapshot`、`encryptedSnapshotFileName` |
 | `src/cli/progress.ts` | 断点续跑账本 | `readProgress`、`completedIds`、`checkResumeAccount`、`reusableSnapshots`、`mergeResults` |
 | `src/cli/report.ts` | 报告结构与 Markdown 渲染 | `renderMarkdown`、`ReportMode` |
@@ -77,7 +77,7 @@
 复核 verifyDeleted（重新拉列表，看是否还在）
  │  └─ deleted/noop 未通过复核 ──→ failed(VERIFY_*)
  ▼
-审计 audit.jsonl（追加写）+ report.json/md + progress.json（断点续跑账本）
+审计 audit.jsonl（逐条追加）+ report.json/md + progress.json（逐条覆盖，断点续跑账本）
 ```
 
 ## 几个刻意的设计决定
@@ -88,7 +88,7 @@
 
 **3. 删除参数形态靠 422 探，不靠猜。** 接口返回 `{detail:[{loc:"body.xxx"}]}` 时会指出字段名。先在 `auto` 模式用单数体试一次，`schema` 类错误即切数组体，并在本次运行内缓存（`onShapeDetected`）。形态探测不消耗失败重试预算，因此 `--retries 0` 也至少会发送一次数组体请求。
 
-**4. 快照失败即中止。** 快照是唯一的事后证据。为了让"省一点磁盘"而放行一个无留档的删除，不划算；需要时可以 `--no-snapshot` 显式承担。快照生成或用户确认保存后，CLI 与油猴会在每次实际 POST（包括重试与删除体形态切换）前再拉一次列表并核对归属、置顶状态和 `updatedAt`；版本变化就中止后续删除。油猴无法直接观察浏览器下载结果，因此要求用户明确输入 `SAVED` 确认文件已保存。
+**4. 快照失败或为空即中止。** 快照是唯一的事后证据，空的 capture 与"没有备份"等价，因此 CLI 在删除前会校验每条快照至少含一段内容，油猴在下载前做同样检查。为了让"省一点磁盘"而放行一个无留档的删除，不划算；需要时可以 `--no-snapshot` 显式承担。快照生成或用户确认保存后，CLI 与油猴会在每次实际 POST（包括重试与删除体形态切换）前再拉一次列表并核对归属、置顶状态和 `updatedAt`；版本变化就中止后续删除。油猴无法直接观察浏览器下载结果，因此要求用户明确输入 `SAVED` 确认文件已保存。快照生成或用户确认保存后，CLI 与油猴会在每次实际 POST（包括重试与删除体形态切换）前再拉一次列表并核对归属、置顶状态和 `updatedAt`；版本变化就中止后续删除。油猴无法直接观察浏览器下载结果，因此要求用户明确输入 `SAVED` 确认文件已保存。
 
 **5. 侧栏不拆 DOM。** 删除后前端状态仍持有节点，手工 `remove()` 会导致列表错乱；油猴端删完只重拉列表，不碰 React 的节点。
 
@@ -116,7 +116,7 @@
 
 1. **账号隔离。** 账本写入当前账号指纹（`accountHash`）。`--resume` 时当前指纹与账本不一致、任一方缺失，都直接 `exit 3`，不给"换账号接着删"留口子。
 2. **快照复用要过完整性与新鲜度。** 文件名必须留在 `snapshots/` 内（拒绝 `../`），明文快照必须通过完整结构校验；加密快照必须通过固定 scrypt 参数、规范 Base64、salt/IV/完整 16 字节 GCM tag 校验并成功解密。两种快照的 `id` 与 `updatedAt` 都必须匹配当前会话，否则重新抓取，不拿旧文件当证据。
-3. **原子落盘。** 先写 `progress.json.tmp-<pid>`（`wx` 独占），再 `rename` 覆盖；进程中途崩溃最多丢本轮，不会留下半截账本。
+3. **逐条落盘。** 先写 `progress.json.tmp-<pid>`（`wx` 独占），再 `rename` 覆盖；每完成一条快照、每拿到一条删除结果都立即覆盖一次，审计按条目追加。进程中途崩溃最多丢当前这一条，已完成的部分仍有账可查、有审计可读。删除结果在复核前只记 `deleted`（无 `verifiedAt`），崩溃后不会被当成"已完成"跳过。
 
 账本损坏时 `readProgress` 返回 `undefined`；但 `--resume` 下"文件存在却读不出"按失败处理（`exit 3`），避免把损坏账本当成全新任务而重复删除。
 

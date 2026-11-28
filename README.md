@@ -24,7 +24,7 @@
 | 分享页拒绝 | ✅ | ✅ | `/share/` 只读，无接口权限 |
 | 归属校验 | ✅ | ✅ | 必须在本账号列表命中；未命中即拒绝，不盲删 |
 | 置顶保护 | ✅ 固定开启 | ✅ `--include-pinned` 可关 | 置顶会话默认跳过 |
-| 删除前快照 | ✅ 下载 JSON 并确认保存 | ✅ `snapshots/` | 仅实际执行时生成；失败或版本过期即中止删除 |
+| 删除前快照 | ✅ 下载 JSON 并确认保存 | ✅ `snapshots/` | 仅实际执行时生成；失败、空快照或版本过期即中止删除 |
 | 快照加密 | — | ✅ `--snapshot-encrypt` | scrypt + AES-256-GCM；固定参数与完整认证标签校验，文件名不含标题 |
 | 仅导出（不删） | — | ✅ `--export-only` | 与 `--apply` 互斥；适合先备份后决定 |
 | 预演（dry-run） | ✅ 默认勾选 | ✅ 默认开启 | 不拉消息、不写快照、不调删除接口；只写报告与审计 |
@@ -37,7 +37,7 @@
 | 批量确认 | ✅ >5 条输入 `DELETE` | ✅ `--yes` | 单次硬上限 50 条 |
 | 断点续跑 | — | ✅ `--resume` | 只跳过带复核证据的完成项；快照 id 与更新时间必须匹配当前会话 |
 | 持久安装 | ✅ 油猴 / MV3 壳 | — | 刷新不失效；MV3 产物在 `dist/extension/` |
-| 标题打码 | — | ✅ `--mask-title` | 同时作用于报告与审计；不改变快照内容 |
+| 标题打码 | — | ✅ `--mask-title` | 同时作用于报告、审计与快照文件名；不改变快照内容 |
 
 ## 快速开始
 
@@ -88,7 +88,7 @@ node dist/dsx-cli.mjs --state auth.json --file links.txt --apply --yes --resume
 DSX_SNAPSHOT_PASSWORD='...' node dist/dsx-cli.mjs --state auth.json --file links.txt --apply --yes --snapshot-encrypt
 ```
 
-也可用环境变量 `DSX_TOKEN` / `DSX_COOKIE` 代替 `--state`。常用选项见 `node dist/dsx-cli.mjs --help`；输出（`report.json`、`report.md`、`audit.jsonl`、`snapshots/`、`progress.json`）默认写到 `./dsx-out`。
+也可用环境变量 `DSX_TOKEN` / `DSX_COOKIE` 代替 `--state`。从 storageState 取凭证时只读 `chat.deepseek.com` 的 `userToken`，Cookie 只带浏览器在 chat 站点本来就会发的那些（`.deepseek.com` 域级 + `chat.deepseek.com` 主机级）；`api.` / `platform.` / `share.` 等子域专属 Cookie 不会转发，需要时用 `DSX_COOKIE` 显式指定。常用选项见 `node dist/dsx-cli.mjs --help`；输出（`report.json`、`report.md`、`audit.jsonl`、`snapshots/`、`progress.json`）默认写到 `./dsx-out`。
 
 退出码：`0` 成功，`2` 部分失败或被拒绝，`3` 鉴权/接口失败。
 
